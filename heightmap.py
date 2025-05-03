@@ -1,24 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-
-def set_axes_equal(ax):
-    """
-    Make 3D axes have equal scale.
-    """
-    x_limits = ax.get_xlim3d()
-    y_limits = ax.get_ylim3d()
-    z_limits = ax.get_zlim3d()
-    x_range = abs(x_limits[1] - x_limits[0])
-    y_range = abs(y_limits[1] - y_limits[0])
-    z_range = abs(z_limits[1] - z_limits[0])
-    max_range = max(x_range, y_range, z_range)
-    x_mid = np.mean(x_limits)
-    y_mid = np.mean(y_limits)
-    z_mid = np.mean(z_limits)
-    ax.set_xlim3d([x_mid - max_range/2, x_mid + max_range/2])
-    ax.set_ylim3d([y_mid - max_range/2, y_mid + max_range/2])
-    ax.set_zlim3d([z_mid - max_range/2, z_mid + max_range/2])
+from scipy.signal import correlate2d
+from scipy.ndimage import rotate
 
 def fade(t):
     """
@@ -26,12 +9,13 @@ def fade(t):
     """
     return 6*t**5 - 15*t**4 + 10*t**3
 
-def generate_perlin_noise_2d(shape, res):
+def generate_perlin_noise_2d(shape, res, amplitude=1.0):
     """
     Generate a 2D Perlin noise heightmap.
     :param shape: Tuple (height, width) of the output array.
     :param res: Number of noise periods along each axis as (res_x, res_y).
-    :return: 2D numpy array of shape `shape`, values in [0, 1].
+    :param amplitude: Amplitude to scale the noise.
+    :return: 2D numpy array of shape `shape`, values in [0, amplitude].
     """
     height, width = shape
     # Create coordinate grid in noise space
@@ -69,19 +53,21 @@ def generate_perlin_noise_2d(shape, res):
     x2 = n01 * (1 - u) + n11 * u
     noise = x1 * (1 - v) + x2 * v
 
-    # Normalize result to [0, 1]
-    return (noise - noise.min()) / (noise.max() - noise.min())
+    # Normalize result to [0, 1] and multiply by amplitude
+    noise = (noise - noise.min()) / (noise.max() - noise.min())
+    return noise * amplitude
 
 class HeightMap:
     """
     Heightmap representation using a 2D array.
     """
-    def __init__(self, width, height, scale=(4, 4), tool_radius=5, seed=None):
+    def __init__(self, width, height, scale=(4, 4), amplitude=1.0, tool_radius=5, seed=None):
         """
         Initialize a heightmap with Perlin noise.
         :param width: Number of columns.
         :param height: Number of rows.
         :param scale: Tuple (res_x, res_y) controlling noise frequency.
+        :param amplitude: Amplitude scale for noise.
         :param tool_radius: Radius of the spherical end-effector tool.
         :param seed: Random seed for reproducibility.
         """
@@ -90,7 +76,9 @@ class HeightMap:
         self.width = width
         self.height = height
         self.tool_radius = tool_radius
-        self.map = generate_perlin_noise_2d((height, width), scale)
+        self.scale = scale
+        self.amplitude = amplitude
+        self.map = generate_perlin_noise_2d((height, width), scale, amplitude)
 
     def apply_press(self, x, y, z_start, dz, theta=0, phi=0, d=0):
         """
@@ -104,55 +92,156 @@ class HeightMap:
         :param d: Unused placeholder for sliding distance.
         """
         z_end = z_start - dz
-        for i in range(self.height):
-            for j in range(self.width):
-                dx = j - x
-                dy = i - y
-                r2 = dx*dx + dy*dy
-                if r2 < self.tool_radius**2:
-                    # Compute new height under sphere
-                    z_intersect = z_end - np.sqrt(self.tool_radius**2 - r2)
-                    self.map[i, j] = min(self.map[i, j], z_intersect)
+        r = self.tool_radius
+        # bounding box
+        y_min = max(0, int(np.floor(y - r)))
+        y_max = min(self.height, int(np.ceil(y + r)) + 1)
+        x_min = max(0, int(np.floor(x - r)))
+        x_max = min(self.width, int(np.ceil(x + r)) + 1)
+        # coordinate grids
+        yy = np.arange(y_min, y_max)[:, None]
+        xx = np.arange(x_min, x_max)[None, :]
+        dx2 = (xx - x)**2
+        dy2 = (yy - y)**2
+        # compute intersection heights only within the tool radius
+        dist2 = dx2 + dy2
+        inside = dist2 <= r**2
+        z_int = np.zeros_like(dist2, dtype=float)
+        z_int[inside] = z_end - np.sqrt(r**2 - dist2[inside])
+        # apply to submap
+        sub = self.map[y_min:y_max, x_min:x_max]
+        sub[inside] = np.minimum(sub[inside], z_int[inside])
+        self.map[y_min:y_max, x_min:x_max] = sub
 
-    def plot(self):
+    def to_grayscale_image(self):
         """
-        2D color map visualization of the heightmap.
+        Convert the heightmap to a uint8 grayscale image (0-255).
         """
-        plt.figure(figsize=(6, 5))
-        plt.imshow(self.map, cmap='terrain', origin='lower')
-        ax = plt.gca()
-        ax.set_aspect('equal', 'box')
-        plt.colorbar(label='Height')
-        plt.title('Heightmap')
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.show()
+        # Normalize to [0,1]
+        h = self.map
+        h_min, h_max = h.min(), h.max()
+        norm = (h - h_min) / (h_max - h_min) if h_max > h_min else np.zeros_like(h)
+        # Scale to [0,255]
+        return (norm * 255).astype(np.uint8)
 
-    def plot_3d(self):
+    def to_rgb_image(self, cmap='terrain'):
         """
-        3D surface plot of the heightmap.
+        Convert the heightmap to an RGB image using a matplotlib colormap.
+        :param cmap: Colormap name.
+        :return: (H, W, 3) uint8 array.
         """
-        X = np.arange(self.width)
-        Y = np.arange(self.height)
-        X, Y = np.meshgrid(X, Y)
-        fig = plt.figure(figsize=(8, 6))
-        ax = fig.add_subplot(111, projection='3d')
-        # ensure equal scaling on all axes
-        try:
-            ax.set_box_aspect((1, 1, 1))
-        except AttributeError:
-            pass
-        ax.plot_surface(X, Y, self.map, rstride=1, cstride=1, cmap='viridis')
-        set_axes_equal(ax)
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Height')
-        plt.title('3D Heightmap')
-        plt.show()
+        norm = (self.map - self.map.min()) / (self.map.max() - self.map.min()) if self.map.max() > self.map.min() else np.zeros_like(self.map)
+        cm = plt.get_cmap(cmap)
+        rgb = cm(norm)[..., :3]  # Drop alpha channel
+        return (rgb * 255).astype(np.uint8)
+
+    def difference(self, other, zero_center=False):
+        """
+        Compute the per-pixel height difference between this heightmap and another.
+        :param other: Another HeightMap instance or a 2D array of the same shape.
+        :param zero_center: If True, subtract the mean difference so that the result is centered around zero.
+        :return: A 2D numpy array of the same shape containing the difference.
+        """
+        # Extract the other height data
+        if isinstance(other, HeightMap):
+            h2 = other.map
+        else:
+            h2 = np.asarray(other)
+        # Compute raw difference
+        diff = self.map - h2
+        # Optionally center around zero
+        if zero_center:
+            diff = diff - np.mean(diff)
+        return diff
+
+    def registered_difference(self, target, zero_center=False, angle_steps=8):
+        """
+        Compute the difference between this heightmap and a target, searching over rotations.
+        Returns (diff, (x_offset, y_offset, angle)).
+        """
+        # Extract target template
+        if isinstance(target, HeightMap):
+            tmpl = target.map
+        else:
+            tmpl = np.asarray(target)
+        best_corr = -np.inf
+        best_offset = (0, 0)
+        best_angle = 0
+        best_tmpl = None
+        # Search over discrete rotations
+        for angle in np.linspace(0, 360, angle_steps, endpoint=False):
+            tmpl_rot = rotate(tmpl, angle, reshape=False, order=1)
+            corr = correlate2d(self.map, tmpl_rot, mode='valid')
+            y_off, x_off = np.unravel_index(np.argmax(corr), corr.shape)
+            val = corr[y_off, x_off]
+            if val > best_corr:
+                best_corr = val
+                best_offset = (x_off, y_off)
+                best_angle = angle
+                best_tmpl = tmpl_rot
+        # Extract matching patch
+        h, w = best_tmpl.shape
+        x_off, y_off = best_offset
+        patch = self.map[y_off:y_off + h, x_off:x_off + w]
+        # Compute difference
+        diff = patch - best_tmpl
+        if zero_center:
+            diff = diff - np.mean(diff)
+        return diff, (x_off, y_off, best_angle)
+
+    def reset(self, seed=None):
+        """
+        Reset the heightmap to a new random Perlin noise state.
+        :param seed: Optional random seed for reproducibility.
+        """
+        if seed is not None:
+            np.random.seed(seed)
+        self.map = generate_perlin_noise_2d(
+            (self.height, self.width), self.scale, self.amplitude)
+
+    def get_state(self, as_rgb=False, cmap='terrain'):
+        """
+        Return the current heightmap as an image suitable for RL observation.
+        :param as_rgb: If True, returns an RGB image; otherwise, grayscale.
+        :param cmap: Colormap name for RGB output.
+        :return: numpy array of shape (H, W) for grayscale or (H, W, 3) for RGB.
+        """
+        if as_rgb:
+            return self.to_rgb_image(cmap)
+        else:
+            return self.to_grayscale_image()
+
+    def compute_reward(self, target, zero_center=True, method='l2'):
+        """
+        Compute a scalar reward comparing this heightmap to a target patch.
+        :param target: Another HeightMap or 2D array to match.
+        :param zero_center: Whether to zero-center the difference.
+        :param method: 'l2' (negative Euclidean norm) or 'l1' (negative sum of abs).
+        :return: (reward, (x_offset, y_offset)) tuple, where reward is higher (less negative)
+                 when the patch better matches the target.
+        """
+        diff, offset = self.registered_difference(target, zero_center=zero_center)
+        if method == 'l2':
+            reward = -np.linalg.norm(diff)
+        elif method == 'l1':
+            reward = -np.sum(np.abs(diff))
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        return reward, offset
 
 if __name__ == "__main__":
     # Demonstration
-    hm = HeightMap(100, 100, scale=(4, 4), tool_radius=10, seed=42)
-    hm.plot()
-    hm.apply_press(x=50, y=50, z_start=5.0, dz=0.4)
-    hm.plot_3d()
+    hm = HeightMap(400, 400, scale=(2, 2), amplitude=10, tool_radius=20, seed=42)
+    hm.apply_press(x=50, y=50, z_start=20.0, dz=10)
+    # Compute and plot difference between the original and deformed maps
+    other_map = HeightMap(400, 400, scale=(4, 4), amplitude=10, tool_radius=20, seed=42)
+    diff = hm.difference(other_map, zero_center=True)
+    plt.figure(figsize=(6, 5))
+    plt.imshow(diff, cmap='bwr', origin='lower')
+    ax = plt.gca()
+    ax.set_aspect('equal', 'box')
+    plt.colorbar(label='Height Difference')
+    plt.title('Difference (zero-centered)')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+    plt.show()
