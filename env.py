@@ -14,7 +14,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  target_scale_range=(2, 4),
                  amplitude_range=(1.0, 20.0),
                  tool_radius=20,
-                 max_steps=100):
+                 max_steps=200):
         self._width = width
         self._height = height
         self._patch_width = patch_width
@@ -30,16 +30,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
             shape=(4,),
             dtype=np.float32,
             minimum=np.array([0, 0, 0, 0], dtype=np.float32),
-            maximum=np.array([self._width - 1,
-                               self._height - 1,
+            maximum=np.array([1.0,
+                               1.0,
                                self._amplitude_range[1],
                                self._amplitude_range[1]], dtype=np.float32),
             name='action'
         )
 
-        # Observation spec: registered difference patch
+        # Observation spec: registered difference patch with channel dimension
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(self._patch_height, self._patch_width),
+            shape=(self._patch_height, self._patch_width, 1),
             dtype=np.float32,
             minimum=-1.0,
             maximum=1.0,
@@ -82,8 +82,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._episode_ended = False
 
         # Compute initial difference and normalize to [-1,1]
-        diff, _ = self._env_map.registered_difference(self._target_map, zero_center=True)
+        diff = self._env_map.difference(self._target_map)
         obs = (diff / self._amplitude_range[1]).astype(np.float32)
+        obs = obs[..., np.newaxis]
         return ts.restart(obs)
 
     def _step(self, action):
@@ -92,22 +93,26 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Parse action
         x, y, z_start, dz = action
+        # Scale normalized x,y to actual map coordinates
+        x = np.clip(x * self._width, self._tool_radius, self._width - self._tool_radius)
+        y = np.clip(y * self._height, self._tool_radius, self._height - self._tool_radius)
         # Convert normalized heights back to map units
         z_max = self._env_map.amplitude
         z0 = z_start * z_max
         dz0 = dz * z_max
 
+        # Track surface before pressing to detect no-op
+        prev_map = self._env_map.map.copy()
         self._env_map.apply_press(x, y, z0, dz0)
 
-        # Compute reward
-        reward, _ = self._env_map.compute_reward(self._target_map,
-                                                 zero_center=True,
-                                                 method='l2')
+        reward = -self._env_map.compute_reward(
+            self._target_map, method='l1')
         self._step_count += 1
 
         # Compute new difference and normalize to [-1,1]
-        diff, _ = self._env_map.registered_difference(self._target_map, zero_center=True)
+        diff = self._env_map.difference(self._target_map)
         obs = (diff / self._amplitude_range[1]).astype(np.float32)
+        obs = obs[..., np.newaxis]
         if self._step_count >= self._max_steps:
             self._episode_ended = True
             return ts.termination(obs, reward)
