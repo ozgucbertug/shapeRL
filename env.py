@@ -12,8 +12,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  patch_height=400,
                  scale_range=(1, 2),
                  target_scale_range=(2, 4),
-                 amplitude_range=(1.0, 20.0),
-                 tool_radius=20,
+                 amplitude_range=(10.0, 40.0),
+                 tool_radius=25,
                  max_steps=200):
         self._width = width
         self._height = height
@@ -25,19 +25,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tool_radius = tool_radius
         self._max_steps = max_steps
 
-        # Action spec: [x, y, z_start, dz]
+        # Action spec: [x, y, dz]
         self._action_spec = array_spec.BoundedArraySpec(
-            shape=(4,),
+            shape=(3,),
             dtype=np.float32,
-            minimum=np.array([0, 0, 0, 0], dtype=np.float32),
-            maximum=np.array([1.0,
-                               1.0,
-                               self._amplitude_range[1],
-                               self._amplitude_range[1]], dtype=np.float32),
+            minimum=np.array([0, 0, 0], dtype=np.float32),
+            maximum=np.array([1.0, 1.0, 1.0], dtype=np.float32),
             name='action'
         )
 
-        # Observation spec: registered difference patch with channel dimension
         self._observation_spec = array_spec.BoundedArraySpec(
             shape=(self._patch_height, self._patch_width, 1),
             dtype=np.float32,
@@ -59,8 +55,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
     def _reset(self):
         # Sample new substrate
-        scale_x = np.random.randint(self._scale_range[0], self._scale_range[1] + 1)
-        scale_y = np.random.randint(self._scale_range[0], self._scale_range[1] + 1)
+        scale_x = np.random.uniform(self._scale_range[0], self._scale_range[1])
+        scale_y = np.random.uniform(self._scale_range[0], self._scale_range[1])
         amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
         self._env_map = HeightMap(self._width,
                                   self._height,
@@ -69,8 +65,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                   tool_radius=self._tool_radius)
 
         # Sample new target patch
-        tgt_scale_x = np.random.randint(self._target_scale_range[0], self._target_scale_range[1] + 1)
-        tgt_scale_y = np.random.randint(self._target_scale_range[0], self._target_scale_range[1] + 1)
+        tgt_scale_x = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
+        tgt_scale_y = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
         tgt_amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
         self._target_map = HeightMap(self._patch_width,
                                      self._patch_height,
@@ -92,21 +88,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return self._reset()
 
         # Parse action
-        x, y, z_start, dz = action
+        x, y, dz = action
         # Scale normalized x,y to actual map coordinates
         x = np.clip(x * self._width, self._tool_radius, self._width - self._tool_radius)
         y = np.clip(y * self._height, self._tool_radius, self._height - self._tool_radius)
-        # Convert normalized heights back to map units
-        z_max = self._env_map.amplitude
-        z0 = z_start * z_max
-        dz0 = dz * z_max
+        # Scale normalized dz to actual press depth (max half tool radius)
+        dz0 = dz * (self._tool_radius*.66)
 
-        # Track surface before pressing to detect no-op
-        prev_map = self._env_map.map.copy()
-        self._env_map.apply_press(x, y, z0, dz0)
-
-        reward = -self._env_map.compute_reward(
-            self._target_map, method='l1')
+        # Apply press and get local reward from the press area
+        reward = self._env_map.apply_press(x, y, dz0, target=self._target_map)
+        # Compute the updated difference map for the observation
         self._step_count += 1
 
         # Compute new difference and normalize to [-1,1]

@@ -4,16 +4,15 @@ from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
 from tf_agents.agents.sac import sac_agent
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.replay_buffers import reverb_replay_buffer
 from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
 from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.metrics import tf_metrics
-from tf_agents.eval.metric_utils import log_metrics
 from tf_agents.utils.common import function, Checkpointer
 from tensorflow.keras.layers import Conv2D, Resizing
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
+import numpy as np
 
 def compute_avg_return(environment, policy, num_episodes=10):
     total_return = 0.0
@@ -32,7 +31,7 @@ def train():
     num_iterations = 200000
     collect_steps_per_iteration = 1
     replay_buffer_capacity = 100000
-    batch_size = 16
+    batch_size = 64
     learning_rate = 3e-4
     gamma = 0.99
     eval_interval = 10000
@@ -54,7 +53,8 @@ def train():
     actor_net = actor_distribution_network.ActorDistributionNetwork(
         input_tensor_spec=observation_spec,
         output_tensor_spec=action_spec,
-        conv_layer_params=((16, 3, 2), (32, 3, 2)),
+        conv_layer_params=((16, 3, 2),      # 16 filters, 3×3 kernel, stride 2
+                        (32, 3, 2)),        # 32 filters, 3×3 kernel, stride 2
         fc_layer_params=(256, 128)
     )
     critic_net = CriticNetwork(
@@ -144,7 +144,7 @@ def train():
         experience, _ = next(iterator)
         train_loss = tf_agent.train(experience).loss
         step = tf_agent.train_step_counter.numpy()
-        if step % 1 == 0:
+        if step % vis_interval == 0:
             print(f'step={step}: loss={train_loss.numpy():.4f}')
 
         if step % eval_interval == 0:
@@ -154,9 +154,13 @@ def train():
 
         # Non-blocking Matplotlib visualization every vis_interval steps
         if step % vis_interval == 0:
-            env_img = train_py_env._env_map.map
-            target_img = train_py_env._target_map.map
-            diff_img = env_img - target_img
+            # Mean-center env and target maps
+            env_raw = train_py_env._env_map.map
+            target_raw = train_py_env._target_map.map
+            env_img = env_raw - np.mean(env_raw)
+            target_img = target_raw - np.mean(target_raw)
+            diff_img, reward = train_py_env._env_map.compute_reward(train_py_env._target_map)
+            print(reward)
             axes_vis[0].clear()
             axes_vis[0].imshow(env_img, cmap='turbo')
             axes_vis[0].set_title(f'Env @ step {step}')
