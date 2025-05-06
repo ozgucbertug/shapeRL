@@ -8,11 +8,11 @@ from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
 from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.metrics import tf_metrics
 from tf_agents.utils.common import function, Checkpointer
-from tensorflow.keras.layers import Conv2D, Resizing
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
+import argparse
 
 def compute_avg_return(environment, policy, num_episodes=10):
     total_return = 0.0
@@ -26,18 +26,16 @@ def compute_avg_return(environment, policy, num_episodes=10):
         total_return += episode_return
     return total_return / num_episodes
 
-def train():
+def train(vis_interval=100):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 1
-    replay_buffer_capacity = 100000
+    replay_buffer_capacity = 1000
     batch_size = 64
     learning_rate = 3e-4
     gamma = 0.99
     eval_interval = 10000
     num_eval_episodes = 5
-    # Visualization settings
-    vis_interval = 10
 
     # Create environments
     train_py_env = SandShapingEnv()
@@ -54,12 +52,13 @@ def train():
         input_tensor_spec=observation_spec,
         output_tensor_spec=action_spec,
         conv_layer_params=((16, 3, 2),      # 16 filters, 3×3 kernel, stride 2
-                        (32, 3, 2)),        # 32 filters, 3×3 kernel, stride 2
+                           (32, 3, 2)),        # 32 filters, 3×3 kernel, stride 2
         fc_layer_params=(256, 128)
     )
     critic_net = CriticNetwork(
         input_tensor_spec=(observation_spec, action_spec),
-        observation_conv_layer_params=((16, 3, 2), (32, 3, 2)),
+        observation_conv_layer_params=((16, 3, 2),
+                                       (32, 3, 2)),
         action_fc_layer_params=None,
         joint_fc_layer_params=(256, 128),
         name='critic_network'
@@ -126,52 +125,55 @@ def train():
     train_checkpointer.initialize_or_restore()
 
     # Warm up replay buffer before training
-    initial_collect_steps = batch_size + 1
-    for _ in range(initial_collect_steps):
+    for _ in range(batch_size + 1):
         collect_driver.run()
 
-    # Set up non-blocking Matplotlib visualization
-    fig_vis, axes_vis = plt.subplots(1, 3, figsize=(15, 5))
+    # Set up visualization if requested
+    if vis_interval > 0:
+        fig_vis, axes_vis = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Training loop
-    tf_agent.train = function(tf_agent.train)
-    collect_driver.run = function(collect_driver.run)
-
-    for _ in range(num_iterations):
-        # Collect data
+    # Fuse data collection and training into one tf.function to avoid repeated tracing
+    @function
+    def train_step():
+        # Collect one step of data
         collect_driver.run()
         # Sample a batch and train
         experience, _ = next(iterator)
-        train_loss = tf_agent.train(experience).loss
+        return tf_agent.train(experience).loss
+
+    for _ in range(num_iterations):
+        # Run fused train step
+        train_loss = train_step()
         step = tf_agent.train_step_counter.numpy()
-        if step % vis_interval == 0:
-            print(f'step={step}: loss={train_loss.numpy():.4f}')
-
-        if step % eval_interval == 0:
-            avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
-            print(f'step={step}: avg_return={avg_return:.2f}')
-
-
-        # Non-blocking Matplotlib visualization every vis_interval steps
-        if step % vis_interval == 0:
+        print(f"step: {step}")
+        # Visualization every vis_interval steps
+        if vis_interval > 0 and step % vis_interval == 0:
             # Mean-center env and target maps
             env_raw = train_py_env._env_map.map
             target_raw = train_py_env._target_map.map
             env_img = env_raw - np.mean(env_raw)
             target_img = target_raw - np.mean(target_raw)
-            diff_img, reward = train_py_env._env_map.compute_reward(train_py_env._target_map)
-            print(reward)
+            diff_img = train_py_env._env_map.difference(train_py_env._target_map)
+            vmin, vmax = diff_img.min(), diff_img.max()
+            
             axes_vis[0].clear()
             axes_vis[0].imshow(env_img, cmap='turbo')
             axes_vis[0].set_title(f'Env @ step {step}')
+
             axes_vis[1].clear()
             axes_vis[1].imshow(target_img, cmap='turbo')
             axes_vis[1].set_title('Target')
+
             axes_vis[2].clear()
-            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp, vmax=max_amp)
-            axes_vis[2].set_title('Difference')
+            axes_vis[2].imshow(diff_img, cmap='viridis', vmin=-max_amp, vmax=max_amp)
+            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}')
+
             fig_vis.canvas.draw()
             plt.pause(0.001)
+        if step % eval_interval == 0:
+            avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
+            print(f'step={step}: avg_return={avg_return:.2f}')
+
 
     # Save final policy
     policy_dir = 'policy'
@@ -179,4 +181,4 @@ def train():
     tf_policy_saver.save(policy_dir)
 
 if __name__ == '__main__':
-    train()
+    train(vis_interval=1)
