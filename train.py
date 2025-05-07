@@ -43,7 +43,7 @@ def train(vis_interval=50, num_parallel_envs=8):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 1
-    replay_buffer_capacity = 5000
+    replay_buffer_capacity = 2048
     batch_size = 32
     learning_rate = 1e-3
     gamma = 0.99
@@ -149,7 +149,9 @@ def train(vis_interval=50, num_parallel_envs=8):
         collect_driver.run()
 
     if vis_interval > 0:
-        fig_vis, axes_vis = plt.subplots(1, 3, figsize=(15, 5))
+        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(15, 10))
+        # Prepare shared colorbars for each column
+        cbars = [None, None, None]
 
     @function
     def train_step():
@@ -163,24 +165,49 @@ def train(vis_interval=50, num_parallel_envs=8):
         if step % log_interval == 0:
             tqdm.write(f'step {step}: train_loss = {float(train_loss):.4f}')
         if vis_interval > 0 and step % vis_interval == 0:
-            env_raw = vis_env._env_map.map
-            target_raw = vis_env._target_map.map
-            diff_img = vis_env._env_map.difference(vis_env._target_map)
-            
-            vmin, vmax = env_raw.min(), env_raw.max()
-            axes_vis[0].clear()
-            axes_vis[0].imshow(env_raw - np.mean(env_raw), cmap='viridis')
-            axes_vis[0].set_title(f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
+            # Compute maps and observation
+            h = vis_env._env_map.map
+            t = vis_env._target_map.map
+            diff = vis_env._env_map.difference(vis_env._target_map)
+            obs = vis_env._build_observation(diff, h, t)
 
-            vmin, vmax = target_raw.min(), target_raw.max()
-            axes_vis[1].clear()
-            axes_vis[1].imshow(target_raw - np.mean(target_raw), cmap='viridis')
-            axes_vis[1].set_title(f'Target | min:{vmin:.1f}, max:{vmax:.1f}')
+            # First row: raw maps
+            # Env raw
+            vmin, vmax = h.min(), h.max()
+            ax = axes_vis[0, 0]
+            ax.clear()
+            ax.imshow(h - np.mean(h), cmap='viridis')
+            ax.set_title(f'Env @ step {step}\nmin:{vmin:.1f}, max:{vmax:.1f}')
+            # Target raw
+            vmin, vmax = t.min(), t.max()
+            ax = axes_vis[0, 1]
+            ax.clear()
+            ax.imshow(t - np.mean(t), cmap='viridis')
+            ax.set_title(f'Target\nmin:{vmin:.1f}, max:{vmax:.1f}')
+            # Difference raw
+            vmin, vmax = diff.min(), diff.max()
+            ax = axes_vis[0, 2]
+            ax.clear()
+            ax.imshow(diff, cmap='turbo', vmin=-max_amp/2, vmax=max_amp/2)
+            ax.set_title(f'Diff raw\nmin:{vmin:.1f}, max:{vmax:.1f}, rmse={np.sqrt(np.sum(diff**2)):.1f}')
 
-            vmin, vmax = diff_img.min(), diff_img.max()
-            axes_vis[2].clear()
-            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp/2, vmax=max_amp/2)
-            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, rmse = {np.sqrt(np.sum(np.square(diff_img))):.1f}')
+            # Second row: observation channels
+            channel_names = ['difference', 'current height', 'target height']
+            for i, name in enumerate(channel_names):
+                ax = axes_vis[1, i]
+                ax.clear()
+                im = ax.imshow(obs[..., i], cmap='turbo',
+                               vmin=obs[..., i].min(), vmax=obs[..., i].max())
+                ax.set_title(f'{name} channel\n(step {step})')
+
+            # Update or create shared colorbars per column
+            for i in range(3):
+                im = axes_vis[1, i].images[0]
+                if cbars[i] is None:
+                    cbars[i] = fig_vis.colorbar(im, ax=axes_vis[:, i], label='value')
+                else:
+                    cbars[i].mappable = im
+                    cbars[i].update_normal(im)
 
             if plt.get_fignums():
                 fig_vis.canvas.draw()
@@ -198,9 +225,9 @@ def train(vis_interval=50, num_parallel_envs=8):
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=50,
+    parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=8,
+    parser.add_argument('--num_envs', type=int, default=11,
                         help='Number of parallel environments for training')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
