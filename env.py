@@ -27,15 +27,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._vol_penalty = 0.1
         # Fixed penalty for presses that change nothing
         self._zero_penalty = 0.1
+        # Penalty for a press that contacts nothing
+        self._no_touch_penalty = 0.1
         self._tool_radius = tool_radius
         self._max_steps = max_steps
 
-        # Action spec: [x, y, dz]
+        # Action spec: [x, y, z_abs, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
-            shape=(3,),
+            shape=(4,),
             dtype=np.float32,
-            minimum=np.array([0, 0, 0], dtype=np.float32),
-            maximum=np.array([1.0, 1.0, 1.0], dtype=np.float32),
+            minimum=np.array([0, 0, 0, 0], dtype=np.float32),
+            maximum=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
             name='action'
         )
 
@@ -104,18 +106,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return self._reset()
 
         # Parse action
-        x_norm, y_norm, dz = action
+        x_norm, y_norm, z_norm, dz_norm = action
 
-        x = self._tool_radius + x_norm * (self._width - 2*self._tool_radius)
-        y = self._tool_radius + y_norm * (self._height - 2*self._tool_radius)
-        dz0 = dz * (self._tool_radius * 0.66)
+        x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
+        y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
+
+        # Absolute tool tip height in world Z
+        z_abs  = z_norm  * self._env_map.amplitude + self._env_map.bedrock
+        dz_rel = dz_norm * (0.66 * self._env_map.amplitude)
 
         # Compute pre-press global error
         diff_before = self._env_map.difference(self._target_map)
         err_before = np.sqrt(np.sum(np.square(diff_before)))
 
         # Apply press and get carved volume
-        removed = self._env_map.apply_press(x, y, dz0)
+        removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Compute post-press global error
         diff_after = self._env_map.difference(self._target_map)
@@ -126,8 +131,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Subtract a cost proportional to the volume removed
         raw_reward -= self._vol_penalty * removed
         # Penalize no-op presses
-        if removed == 0:
-            raw_reward -= self._zero_penalty
+        if not touched:
+            raw_reward -= self._no_touch_penalty
 
         # Normalize and clip reward
         reward = raw_reward / self._initial_error

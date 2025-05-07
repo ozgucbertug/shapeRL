@@ -84,6 +84,12 @@ def train(vis_interval=100):
     )
     tf_agent.initialize()
 
+    # Logging and checkpoint setup
+    log_interval = 1000
+    checkpoint_interval = eval_interval
+    policy_dir = 'checkpoints'
+    policy_saver = PolicySaver(tf_agent.policy)
+
     # Replay buffer
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
@@ -146,6 +152,9 @@ def train(vis_interval=100):
     for step in trange(1, num_iterations + 1, desc='Training'):
         # Run fused train step
         train_loss = train_step()
+        # Verbose training loss logging
+        if step % log_interval == 0:
+            tqdm.write(f'step {step}: train_loss = {train_loss:.4f}')
         # Visualization every vis_interval steps
         if vis_interval > 0 and step % vis_interval == 0:
             # Mean-center env and target maps
@@ -155,20 +164,21 @@ def train(vis_interval=100):
             target_img = target_raw - np.mean(target_raw)
             diff_img = train_py_env._env_map.difference(train_py_env._target_map)
             
-            vmin, vmax = env_img.min(), env_img.max()
+            vmin, vmax = env_raw.min(), env_raw.max()
             axes_vis[0].clear()
             axes_vis[0].imshow(env_img, cmap='turbo')
             axes_vis[0].set_title(f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
 
-            vmin, vmax = target_img.min(), target_img.max()
+            vmin, vmax = target_raw.min(), target_raw.max()
             axes_vis[1].clear()
             axes_vis[1].imshow(target_img, cmap='turbo')
-            axes_vis[1].set_title('Target')
+            axes_vis[1].set_title(f'Target | min:{vmin:.1f}, max:{vmax:.1f}')
 
             vmin, vmax = diff_img.min(), diff_img.max()
+            vrange = vmax-vmin
             axes_vis[2].clear()
             axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp, vmax=max_amp)
-            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}')
+            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, range = {vrange:.1f}')
 
             fig_vis.canvas.draw()
             plt.pause(0.001)
@@ -176,12 +186,16 @@ def train(vis_interval=100):
         if step % eval_interval == 0:
             avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
             tqdm.write(f'step={step}: avg_return={avg_return:.2f}')
+            # Save agent checkpoint and policy
+            train_checkpointer.save(global_step=step)
+            tqdm.write(f'Checkpoint saved at step {step}')
+            policy_saver.save(policy_dir)
+            tqdm.write(f'Policy saved at {policy_dir}')
 
 
     # Save final policy
-    policy_dir = 'policy'
     tf_policy_saver = PolicySaver(tf_agent.policy)
     tf_policy_saver.save(policy_dir)
 
 if __name__ == '__main__':
-    train(vis_interval=1)
+    train(vis_interval=10)

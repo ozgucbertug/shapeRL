@@ -67,7 +67,7 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
 
 # JIT-accelerated spherical press carve for HeightMap
 @numba.njit
-def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz):
+def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz, bedrock=0):
     """
     JIT-compiled spherical press carve. Modifies map_arr in-place and returns volume removed.
     """
@@ -98,6 +98,9 @@ def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz):
             if press_mask[i, j]:
                 orig = map_arr[yi, xj]
                 intr = h_center - dz + press_offset[i, j]
+                # Clamp to bedrock so the terrain never goes below zero (or user‑set floor)
+                if intr < bedrock:
+                    intr = bedrock
                 if intr < orig:
                     removed += orig - intr
                     map_arr[yi, xj] = intr
@@ -107,7 +110,8 @@ class HeightMap:
     """
     Heightmap representation using a 2D numpy array.
     """
-    def __init__(self, width, height, scale=(4, 4), amplitude=1.0, tool_radius=5, seed=None):
+    def __init__(self, width, height, scale=(4, 4), amplitude=1.0,
+                 tool_radius=5, seed=None, bedrock=0.0):
         """
         Initialize a heightmap with Perlin noise.
         """
@@ -132,6 +136,7 @@ class HeightMap:
         # Running sum and count for fast mean-centered diff
         self._size = self.width * self.height
         self._sum = float(np.sum(self.map))
+        self.bedrock = bedrock
 
     def apply_press(self, x, y, dz):
         """
@@ -139,10 +144,34 @@ class HeightMap:
         """
         # Use JIT-accelerated carve
         removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
-                                  self.tool_radius, x, y, dz)
+                                  self.tool_radius, x, y, dz, self.bedrock)
         # Update running sum for fast mean recompute
         self._sum -= removed
         return removed
+
+    def apply_press_abs(self, x, y, z_abs, dz_rel):
+        """
+        Absolute‑pose press:
+        1. Move tool tip to absolute height z_abs.
+        2. Push further down by dz_rel (non‑negative).
+        Returns (removed_volume, touched_flag)
+        """
+        # Clamp z_abs not to exceed current map max (no effect)
+        # Determine center pixel
+        cy = int(np.clip(round(y), self.tool_radius, self.height - 1 - self.tool_radius))
+        cx = int(np.clip(round(x), self.tool_radius, self.width  - 1 - self.tool_radius))
+        h_center = float(self.map[cy, cx])
+
+        tip_final = max(z_abs - dz_rel, self.bedrock)
+        # If final tip is not below current surface, nothing happens
+        dz_effective = h_center - tip_final
+        if dz_effective <= 1e-6:
+            return 0.0, False
+
+        removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
+                                   self.tool_radius, x, y, dz_effective, self.bedrock)
+        self._sum -= removed
+        return removed, True
 
     def apply_press_py(self, x, y, dz):
         """
@@ -164,6 +193,7 @@ class HeightMap:
             mask = self._press_mask
             # Compute per-pixel intrusion heights
             z_int = h_center - dz + self._press_offset
+            z_int = np.maximum(z_int, self.bedrock)   # clamp
             old_vals = sub[mask]
             new_vals = np.minimum(old_vals, z_int[mask])
             removed = np.sum(old_vals - new_vals)
@@ -184,6 +214,7 @@ class HeightMap:
             offset_sub = self._press_offset[off_y0:off_y1, off_x0:off_x1]
             # Compute per-pixel intrusion heights
             z_int = h_center - dz + offset_sub
+            z_int = np.maximum(z_int, self.bedrock)   # clamp
             old_vals = sub[mask_sub]
             new_vals = np.minimum(old_vals, z_int[mask_sub])
             removed = np.sum(old_vals - new_vals)
