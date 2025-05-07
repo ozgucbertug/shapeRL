@@ -39,18 +39,30 @@ def compute_avg_return(environment, policy, num_episodes=10):
         total_return += episode_return
     return total_return / num_episodes
 
-def train(vis_interval=50, num_parallel_envs=8, checkpoint_dir='ckpts', eval_interval=5000):
+def train(vis_interval=50, num_parallel_envs=8):
     # Hyperparameters
     num_iterations = 200000
-    # Batch settings
-    steps_per_call = 10  # train steps per tf.function call
-    collect_steps_per_iteration = steps_per_call
+    collect_steps_per_iteration = 1
     replay_buffer_capacity = 5000
     batch_size = 32
     learning_rate = 1e-3
     gamma = 0.99
+    eval_interval = 5000
     num_eval_episodes = 5
     warmup_batches = batch_size // num_parallel_envs
+
+
+
+    def make_env():
+        return SandShapingEnv()
+    train_py_env = ParallelPyEnvironment([make_env for _ in range(num_parallel_envs)])
+    eval_py_env  = SandShapingEnv()
+
+    vis_env = SandShapingEnv()
+    max_amp = vis_env._amplitude_range[1]
+
+    train_env = tf_py_environment.TFPyEnvironment(train_py_env)
+    eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
     # Network architecture
     conv_layer_params = ((32, 3, 2), (64, 3, 2))
@@ -91,8 +103,7 @@ def train(vis_interval=50, num_parallel_envs=8, checkpoint_dir='ckpts', eval_int
     tf_agent.initialize()
 
     log_interval = 1000
-    # Checkpoint directory for saving/resuming training (from parameter)
-    # checkpoint_dir comes from function argument
+    checkpoint_dir = 'ckpts'
     policy_base    = 'policies'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(policy_base, exist_ok=True)
@@ -142,15 +153,11 @@ def train(vis_interval=50, num_parallel_envs=8, checkpoint_dir='ckpts', eval_int
 
     @function
     def train_step():
-        total_loss = 0.0
-        for _ in tf.range(steps_per_call):
-            collect_driver.run()
-            experience, _ = next(iterator)
-            info = tf_agent.train(experience)
-            total_loss += info.loss
-        return total_loss / tf.cast(steps_per_call, tf.float32)
+        collect_driver.run()
+        experience, _ = next(iterator)
+        return tf_agent.train(experience).loss
 
-    for step in trange(steps_per_call, num_iterations + 1, steps_per_call, desc='Training'):
+    for step in trange(1, num_iterations + 1, desc='Training'):
         train_loss = train_step()
         vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
@@ -195,15 +202,9 @@ def main(_argv=None):
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=8,
                         help='Number of parallel environments for training')
-    parser.add_argument('--checkpoint_dir', type=str, default='ckpts',
-                        help='Directory to save checkpoints')
-    parser.add_argument('--eval_interval', type=int, default=5000,
-                        help='Number of training steps between checkpoints')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
-          num_parallel_envs=args.num_envs,
-          checkpoint_dir=args.checkpoint_dir,
-          eval_interval=args.eval_interval)
+          num_parallel_envs=args.num_envs)
 
 if __name__ == '__main__':
     handle_main(main)
