@@ -8,14 +8,25 @@ from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
 from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.metrics import tf_metrics
 from tf_agents.utils.common import function, Checkpointer
+from tf_agents.environments import ParallelPyEnvironment
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
-from tqdm import trange
+from tqdm.auto import tqdm, trange
+
+from tf_agents.system.system_multiprocessing import handle_main
+import os
+
+def sample_random_action(spec):
+    return np.random.uniform(low=spec.minimum,
+                             high=spec.maximum).astype(np.float32)
 
 def compute_avg_return(environment, policy, num_episodes=10):
+    """Run a fixed number of episodes in `environment` using `policy`
+    and return the *Python float* average return.
+    """
     total_return = 0.0
     for _ in range(num_episodes):
         time_step = environment.reset()
@@ -23,49 +34,56 @@ def compute_avg_return(environment, policy, num_episodes=10):
         while not time_step.is_last():
             action = policy.action(time_step).action
             time_step = environment.step(action)
-            episode_return += time_step.reward
+            # Cast to float to detach from TF / NumPy
+            episode_return += float(time_step.reward)
         total_return += episode_return
     return total_return / num_episodes
 
-def train(vis_interval=100):
+def train(vis_interval=50, num_parallel_envs=8):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 1
-    replay_buffer_capacity = 1024
-    batch_size = 64
-    learning_rate = 3e-4
+    replay_buffer_capacity = 5000
+    batch_size = 32
+    learning_rate = 1e-3
     gamma = 0.99
-    eval_interval = 10000
+    eval_interval = 5000
     num_eval_episodes = 5
+    warmup_batches = batch_size // num_parallel_envs
 
-    # Create environments
-    train_py_env = SandShapingEnv()
-    eval_py_env = SandShapingEnv()
-    # For fixed colormap scaling in visualization
-    max_amp = train_py_env._amplitude_range[1]
+
+
+    def make_env():
+        return SandShapingEnv()
+    train_py_env = ParallelPyEnvironment([make_env for _ in range(num_parallel_envs)])
+    eval_py_env  = SandShapingEnv()
+
+    vis_env = SandShapingEnv()
+    max_amp = vis_env._amplitude_range[1]
+
     train_env = tf_py_environment.TFPyEnvironment(train_py_env)
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
-    # Define networks
+    # Network architecture
+    conv_layer_params = ((32, 3, 2), (64, 3, 2))
+    fc_layer_params = (256, 128)
+
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
     actor_net = actor_distribution_network.ActorDistributionNetwork(
-        input_tensor_spec=observation_spec,
+        input_tensor_spec=observation_spec, 
         output_tensor_spec=action_spec,
-        conv_layer_params=((16, 3, 2),      # 16 filters, 3×3 kernel, stride 2
-                           (32, 3, 2)),        # 32 filters, 3×3 kernel, stride 2
-        fc_layer_params=(256, 128)
+        conv_layer_params=conv_layer_params,
+        fc_layer_params=fc_layer_params
     )
     critic_net = CriticNetwork(
         input_tensor_spec=(observation_spec, action_spec),
-        observation_conv_layer_params=((16, 3, 2),
-                                       (32, 3, 2)),
+        observation_conv_layer_params=conv_layer_params,
         action_fc_layer_params=None,
-        joint_fc_layer_params=(256, 128),
+        joint_fc_layer_params=fc_layer_params,
         name='critic_network'
     )
 
-    # Create SAC agent
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
@@ -84,26 +102,25 @@ def train(vis_interval=100):
     )
     tf_agent.initialize()
 
-    # Logging and checkpoint setup
     log_interval = 1000
-    checkpoint_interval = eval_interval
-    policy_dir = 'checkpoints'
+    checkpoint_dir = 'ckpts'
+    policy_base    = 'policies'
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    os.makedirs(policy_base, exist_ok=True)
     policy_saver = PolicySaver(tf_agent.policy)
 
-    # Replay buffer
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
-        batch_size=train_env.batch_size,
+        batch_size=num_parallel_envs,
         max_length=replay_buffer_capacity
     )
     dataset = replay_buffer.as_dataset(
         sample_batch_size=batch_size,
         num_steps=2,
         single_deterministic_pass=False
-    ).prefetch(3)
+    ).prefetch(50)
     iterator = iter(dataset)
 
-    # Data collection driver
     collect_driver = DynamicStepDriver(
         train_env,
         tf_agent.collect_policy,
@@ -111,7 +128,6 @@ def train(vis_interval=100):
         num_steps=collect_steps_per_iteration
     )
 
-    # Metrics and evaluation
     train_metrics = [
         tf_metrics.NumberOfEpisodes(),
         tf_metrics.EnvironmentSteps(),
@@ -119,8 +135,6 @@ def train(vis_interval=100):
         tf_metrics.AverageEpisodeLengthMetric(),
     ]
 
-    # (Optional) Checkpointer
-    checkpoint_dir = 'checkpoints'
     train_checkpointer = Checkpointer(
         ckpt_dir=checkpoint_dir,
         max_to_keep=1,
@@ -131,71 +145,66 @@ def train(vis_interval=100):
     )
     train_checkpointer.initialize_or_restore()
 
-    # Warm up replay buffer before training
-    for _ in range(batch_size + 1):
+    for _ in range(warmup_batches):
         collect_driver.run()
 
-    # Set up visualization if requested
     if vis_interval > 0:
         fig_vis, axes_vis = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Fuse data collection and training into one tf.function to avoid repeated tracing
     @function
     def train_step():
-        # Collect one step of data
         collect_driver.run()
-        # Sample a batch and train
         experience, _ = next(iterator)
         return tf_agent.train(experience).loss
 
-    # Use tqdm to track training progress
     for step in trange(1, num_iterations + 1, desc='Training'):
-        # Run fused train step
         train_loss = train_step()
-        # Verbose training loss logging
+        vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
-            tqdm.write(f'step {step}: train_loss = {train_loss:.4f}')
-        # Visualization every vis_interval steps
+            tqdm.write(f'step {step}: train_loss = {float(train_loss):.4f}')
         if vis_interval > 0 and step % vis_interval == 0:
-            # Mean-center env and target maps
-            env_raw = train_py_env._env_map.map
-            target_raw = train_py_env._target_map.map
-            env_img = env_raw - np.mean(env_raw)
-            target_img = target_raw - np.mean(target_raw)
-            diff_img = train_py_env._env_map.difference(train_py_env._target_map)
+            env_raw = vis_env._env_map.map
+            target_raw = vis_env._target_map.map
+            diff_img = vis_env._env_map.difference(vis_env._target_map)
             
             vmin, vmax = env_raw.min(), env_raw.max()
             axes_vis[0].clear()
-            axes_vis[0].imshow(env_img, cmap='turbo')
+            axes_vis[0].imshow(env_raw - np.mean(env_raw), cmap='viridis')
             axes_vis[0].set_title(f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
 
             vmin, vmax = target_raw.min(), target_raw.max()
             axes_vis[1].clear()
-            axes_vis[1].imshow(target_img, cmap='turbo')
+            axes_vis[1].imshow(target_raw - np.mean(target_raw), cmap='viridis')
             axes_vis[1].set_title(f'Target | min:{vmin:.1f}, max:{vmax:.1f}')
 
             vmin, vmax = diff_img.min(), diff_img.max()
-            vrange = vmax-vmin
             axes_vis[2].clear()
-            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp, vmax=max_amp)
-            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, range = {vrange:.1f}')
+            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp/2, vmax=max_amp/2)
+            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, rmse = {np.sqrt(np.sum(np.square(diff_img))):.1f}')
 
-            fig_vis.canvas.draw()
+            if plt.get_fignums():
+                fig_vis.canvas.draw()
             plt.pause(0.001)
-        # Evaluation every eval_interval steps
         if step % eval_interval == 0:
             avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
-            tqdm.write(f'step={step}: avg_return={avg_return:.2f}')
-            # Save agent checkpoint and policy
-            train_checkpointer.save(global_step=step)
+            tqdm.write(f'step={step}: avg_return={float(avg_return):.2f}')
+            train_checkpointer.save(global_step)
             tqdm.write(f'Checkpoint saved at step {step}')
-            policy_saver.save(policy_dir)
-            tqdm.write(f'Policy saved at {policy_dir}')
+
+    final_path = os.path.join(policy_base, 'final')
+    PolicySaver(tf_agent.policy).save(final_path)
 
 
-    # Save final policy
-    tf_policy_saver = PolicySaver(tf_agent.policy)
-    tf_policy_saver.save(policy_dir)
+# Main entry point for multiprocessing
+def main(_argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--vis_interval', type=int, default=50,
+                        help='Visualization interval')
+    parser.add_argument('--num_envs', type=int, default=8,
+                        help='Number of parallel environments for training')
+    args = parser.parse_args()
+    train(vis_interval=args.vis_interval,
+          num_parallel_envs=args.num_envs)
 
 if __name__ == '__main__':
-    train(vis_interval=10)
+    handle_main(main)

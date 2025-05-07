@@ -4,17 +4,21 @@ from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
 from heightmap import HeightMap
 
+import matplotlib.pyplot as plt
+
 class SandShapingEnv(py_environment.PyEnvironment):
     def __init__(self,
-                 width=400,
-                 height=400,
-                 patch_width=400,
-                 patch_height=400,
+                 width=256,
+                 height=256,
+                 patch_width=256,
+                 patch_height=256,
                  scale_range=(1, 2),
                  target_scale_range=(2, 4),
                  amplitude_range=(10.0, 40.0),
-                 tool_radius=25,
-                 max_steps=100):
+                 tool_radius=20,
+                 max_steps=100,
+                 debug=False):
+        self.debug = debug
         self._width = width
         self._height = height
         self._patch_width = patch_width
@@ -23,6 +27,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._inv_amplitude_max = 1.0 / self._amplitude_range[1]
+        self._amp_max = self._amplitude_range[1]  # cache to avoid repeated index lookups
         # Penalty coefficient per unit volume removed
         self._vol_penalty = 0.1
         # Fixed penalty for presses that change nothing
@@ -52,6 +57,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._episode_ended = False
         self._env_map = None
         self._target_map = None
+
         self.reset()
 
     def action_spec(self):
@@ -59,6 +65,48 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
     def observation_spec(self):
         return self._observation_spec
+
+    # ------------------------------------------------------------------ #
+    # Utility: build 3‑channel observation and (optionally) visualise it #
+    # ------------------------------------------------------------------ #
+    def _build_observation(self, diff, h, t):
+        """Return the 3‑channel observation tensor.
+
+        Parameters
+        ----------
+        diff : np.ndarray
+            Difference map (env - target), same shape as `h`.
+        h : np.ndarray
+            Current environment height map.
+        t : np.ndarray
+            Target height map.
+
+        Returns
+        -------
+        obs : np.ndarray, float32, shape (H, W, 3), range [-1,1]
+        """
+        s = 0.5 * self._amp_max          # symmetric squash for difference
+        scale_h = self._amp_max          # linear clip for height channels
+
+        obs = np.stack([
+            np.tanh(diff / s),
+            np.clip((h - h.mean()) / scale_h, -1.0, 1.0),
+            np.clip((t - t.mean()) / scale_h, -1.0, 1.0)
+        ], axis=-1).astype(np.float32)
+
+        # One‑time visualisation controlled by self.debug
+        if self.debug and not getattr(self, "_first_obs_shown", False):
+            channel_names = ['difference', 'current height', 'target height']
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            for i, name in enumerate(channel_names):
+                ax = axes[i]
+                im = ax.imshow(obs[..., i], cmap='turbo',
+                               vmin=obs[..., i].min(), vmax=obs[..., i].max())
+                ax.set_title(f'{name} channel (first obs)')
+                fig.colorbar(im, ax=ax, label='value')
+            plt.show(block=True)
+            self._first_obs_shown = True
+        return obs
 
     def _reset(self):
         # Sample new substrate
@@ -90,15 +138,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._initial_error = np.sqrt(np.sum(np.square(diff)))
         if self._initial_error == 0:
             self._initial_error = 1.0
-        # Build 3-channel observation: diff, current height, target height
-        s = 0.5 * self._amplitude_range[1]
+        # Build 3-channel observation:
         h = self._env_map.map
         t = self._target_map.map
-        obs = np.stack([
-            np.tanh(diff    / s),
-            np.tanh((h - h.mean()) / s),
-            np.tanh((t - t.mean()) / s)
-        ], axis=-1).astype(np.float32)
+        obs = self._build_observation(diff, h, t)
         return ts.restart(obs)
 
     def _step(self, action):
@@ -139,16 +182,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         self._step_count += 1
 
-        # Build observation from diff_after using precomputed inverse amplitude
-        # Build 3-channel observation: diff, current height, target height
-        s = 0.5 * self._amplitude_range[1]
         h = self._env_map.map
         t = self._target_map.map
-        obs = np.stack([
-            np.tanh(diff_after    / s),
-            np.tanh((h - h.mean()) / s),
-            np.tanh((t - t.mean()) / s)
-        ], axis=-1).astype(np.float32)
+        obs = self._build_observation(diff_after, h, t)
         if self._step_count >= self._max_steps:
             self._episode_ended = True
             return ts.termination(obs, reward)
