@@ -227,5 +227,9 @@ class HeightMap:
             mean2 = float(np.sum(arr)) / arr.size
             h2 = arr - mean2
         diff = h1 - h2
-        diff -= diff.min()
+        # diff -= diff.min()
         return diff
+
+if __name__ == '__main__':
+    test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40)
+    print(np.max(test.map))

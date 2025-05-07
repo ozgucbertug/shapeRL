@@ -23,6 +23,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._inv_amplitude_max = 1.0 / self._amplitude_range[1]
+        # Penalty coefficient per unit volume removed
+        self._vol_penalty = 0.1
+        # Fixed penalty for presses that change nothing
+        self._zero_penalty = 0.1
         self._tool_radius = tool_radius
         self._max_steps = max_steps
 
@@ -36,7 +40,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         )
 
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(self._patch_height, self._patch_width, 1),
+            shape=(self._patch_height, self._patch_width, 3),
             dtype=np.float32,
             minimum=-1.0,
             maximum=1.0,
@@ -84,8 +88,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._initial_error = np.sqrt(np.sum(np.square(diff)))
         if self._initial_error == 0:
             self._initial_error = 1.0
-        obs = (diff * self._inv_amplitude_max).astype(np.float32)
-        obs = obs[..., np.newaxis]
+        # Build 3-channel observation: diff, current height, target height
+        s = 0.5 * self._amplitude_range[1]
+        h = self._env_map.map
+        t = self._target_map.map
+        obs = np.stack([
+            np.tanh(diff    / s),
+            np.tanh((h - h.mean()) / s),
+            np.tanh((t - t.mean()) / s)
+        ], axis=-1).astype(np.float32)
         return ts.restart(obs)
 
     def _step(self, action):
@@ -103,21 +114,36 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff_before = self._env_map.difference(self._target_map)
         err_before = np.sqrt(np.sum(np.square(diff_before)))
 
-        # Apply press
-        self._env_map.apply_press(x, y, dz0)
+        # Apply press and get carved volume
+        removed = self._env_map.apply_press(x, y, dz0)
 
-        # Compute post-press global error and reward
+        # Compute post-press global error
         diff_after = self._env_map.difference(self._target_map)
         err_after = np.sqrt(np.sum(np.square(diff_after)))
-        reward = err_before - err_after
 
-        print(reward)
+        # Base reward is reduction in global error
+        raw_reward = err_before - err_after
+        # Subtract a cost proportional to the volume removed
+        raw_reward -= self._vol_penalty * removed
+        # Penalize no-op presses
+        if removed == 0:
+            raw_reward -= self._zero_penalty
+
+        # Normalize and clip reward
+        reward = raw_reward / self._initial_error
 
         self._step_count += 1
 
         # Build observation from diff_after using precomputed inverse amplitude
-        obs = (diff_after * self._inv_amplitude_max).astype(np.float32)
-        obs = obs[..., np.newaxis]
+        # Build 3-channel observation: diff, current height, target height
+        s = 0.5 * self._amplitude_range[1]
+        h = self._env_map.map
+        t = self._target_map.map
+        obs = np.stack([
+            np.tanh(diff_after    / s),
+            np.tanh((h - h.mean()) / s),
+            np.tanh((t - t.mean()) / s)
+        ], axis=-1).astype(np.float32)
         if self._step_count >= self._max_steps:
             self._episode_ended = True
             return ts.termination(obs, reward)

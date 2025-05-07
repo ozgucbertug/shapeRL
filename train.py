@@ -13,6 +13,7 @@ from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
 import argparse
+from tqdm import trange
 
 def compute_avg_return(environment, policy, num_episodes=10):
     total_return = 0.0
@@ -30,7 +31,7 @@ def train(vis_interval=100):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 1
-    replay_buffer_capacity = 1000
+    replay_buffer_capacity = 1024
     batch_size = 64
     learning_rate = 3e-4
     gamma = 0.99
@@ -141,11 +142,10 @@ def train(vis_interval=100):
         experience, _ = next(iterator)
         return tf_agent.train(experience).loss
 
-    for _ in range(num_iterations):
+    # Use tqdm to track training progress
+    for step in trange(1, num_iterations + 1, desc='Training'):
         # Run fused train step
         train_loss = train_step()
-        step = tf_agent.train_step_counter.numpy()
-        print(f"step: {step}")
         # Visualization every vis_interval steps
         if vis_interval > 0 and step % vis_interval == 0:
             # Mean-center env and target maps
@@ -154,25 +154,28 @@ def train(vis_interval=100):
             env_img = env_raw - np.mean(env_raw)
             target_img = target_raw - np.mean(target_raw)
             diff_img = train_py_env._env_map.difference(train_py_env._target_map)
-            vmin, vmax = diff_img.min(), diff_img.max()
             
+            vmin, vmax = env_img.min(), env_img.max()
             axes_vis[0].clear()
             axes_vis[0].imshow(env_img, cmap='turbo')
-            axes_vis[0].set_title(f'Env @ step {step}')
+            axes_vis[0].set_title(f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
 
+            vmin, vmax = target_img.min(), target_img.max()
             axes_vis[1].clear()
             axes_vis[1].imshow(target_img, cmap='turbo')
             axes_vis[1].set_title('Target')
 
+            vmin, vmax = diff_img.min(), diff_img.max()
             axes_vis[2].clear()
-            axes_vis[2].imshow(diff_img, cmap='viridis', vmin=-max_amp, vmax=max_amp)
+            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp, vmax=max_amp)
             axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}')
 
             fig_vis.canvas.draw()
             plt.pause(0.001)
+        # Evaluation every eval_interval steps
         if step % eval_interval == 0:
             avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
-            print(f'step={step}: avg_return={avg_return:.2f}')
+            tqdm.write(f'step={step}: avg_return={avg_return:.2f}')
 
 
     # Save final policy
