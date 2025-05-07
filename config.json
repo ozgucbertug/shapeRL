@@ -1,0 +1,18 @@
+{
+  "num_iterations": 200000,
+  "collect_steps_per_iteration": 1,
+  "replay_buffer_capacity": 20000,
+  "batch_size": 64,
+  "learning_rate": 0.0003,
+  "gamma": 0.99,
+  "eval_interval": 10000,
+  "num_eval_episodes": 5,
+  "warmup_steps": 10000,
+  "num_parallel_envs": 5,
+  "conv_layer_params": [[16, 3, 1], [32, 3, 1]],
+  "fc_layer_params": [256, 128],
+  "target_update_tau": 0.005,
+  "target_update_period": 1,
+  "reward_scale_factor": 1.0,
+  "vis_interval": 50
+}

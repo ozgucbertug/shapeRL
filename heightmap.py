@@ -150,12 +150,6 @@ class HeightMap:
         return removed
 
     def apply_press_abs(self, x, y, z_abs, dz_rel):
-        """
-        Absolute‑pose press:
-        1. Move tool tip to absolute height z_abs.
-        2. Push further down by dz_rel (non‑negative).
-        Returns (removed_volume, touched_flag)
-        """
         # Clamp z_abs not to exceed current map max (no effect)
         # Determine center pixel
         cy = int(np.clip(round(y), self.tool_radius, self.height - 1 - self.tool_radius))
