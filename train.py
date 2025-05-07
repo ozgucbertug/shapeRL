@@ -22,9 +22,11 @@ import os
 import json
 from pathlib import Path
 
+
 def sample_random_action(spec):
     return np.random.uniform(low=spec.minimum,
                              high=spec.maximum).astype(np.float32)
+
 
 def compute_avg_return(environment, policy, num_episodes=10):
     """Run a fixed number of episodes in `environment` using `policy`
@@ -41,6 +43,7 @@ def compute_avg_return(environment, policy, num_episodes=10):
             episode_return += float(time_step.reward)
         total_return += episode_return
     return total_return / num_episodes
+
 
 def train(config_path='config.json'):
     cfg_file = Path(config_path)
@@ -65,8 +68,9 @@ def train(config_path='config.json'):
 
     def make_env():
         return SandShapingEnv()
-    train_py_env = parallel_py_environment.ParallelPyEnvironment([make_env] * num_parallel_envs)
-    eval_py_env  = SandShapingEnv()
+    train_py_env = parallel_py_environment.ParallelPyEnvironment(
+        [make_env] * num_parallel_envs)
+    eval_py_env = SandShapingEnv()
 
     vis_env = SandShapingEnv()
     max_amp = vis_env._amplitude_range[1]
@@ -80,7 +84,7 @@ def train(config_path='config.json'):
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
     actor_net = actor_distribution_network.ActorDistributionNetwork(
-        input_tensor_spec=observation_spec, 
+        input_tensor_spec=observation_spec,
         output_tensor_spec=action_spec,
         conv_layer_params=conv_layer_params,
         fc_layer_params=fc_layer_params
@@ -113,7 +117,7 @@ def train(config_path='config.json'):
 
     log_interval = 1000
     checkpoint_dir = 'ckpts'
-    policy_base    = 'policies'
+    policy_base = 'policies'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(policy_base, exist_ok=True)
     policy_saver = PolicySaver(tf_agent.policy)
@@ -177,27 +181,32 @@ def train(config_path='config.json'):
             env_raw = vis_env._env_map.map
             target_raw = vis_env._target_map.map
             diff_img = vis_env._env_map.difference(vis_env._target_map)
-            
+
             vmin, vmax = env_raw.min(), env_raw.max()
             axes_vis[0].clear()
             axes_vis[0].imshow(env_raw - np.mean(env_raw), cmap='viridis')
-            axes_vis[0].set_title(f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
+            axes_vis[0].set_title(
+                f'Env @ step {step} | min:{vmin:.1f}, max:{vmax:.1f}')
 
             vmin, vmax = target_raw.min(), target_raw.max()
             axes_vis[1].clear()
-            axes_vis[1].imshow(target_raw - np.mean(target_raw), cmap='viridis')
+            axes_vis[1].imshow(
+                target_raw - np.mean(target_raw), cmap='viridis')
             axes_vis[1].set_title(f'Target | min:{vmin:.1f}, max:{vmax:.1f}')
 
             vmin, vmax = diff_img.min(), diff_img.max()
             axes_vis[2].clear()
-            axes_vis[2].imshow(diff_img, cmap='turbo', vmin=-max_amp/2, vmax=max_amp/2)
-            axes_vis[2].set_title(f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, rmse = {np.sqrt(np.sum(np.square(diff_img))):.1f}')
+            axes_vis[2].imshow(diff_img, cmap='turbo',
+                               vmin=-max_amp/2, vmax=max_amp/2)
+            axes_vis[2].set_title(
+                f'Difference | min:{vmin:.1f}, max:{vmax:.1f}, rmse = {np.sqrt(np.sum(np.square(diff_img))):.1f}')
 
             if plt.get_fignums():
                 fig_vis.canvas.draw()
             plt.pause(0.001)
         if step % eval_interval == 0:
-            avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
+            avg_return = compute_avg_return(
+                eval_env, tf_agent.policy, num_eval_episodes)
             tqdm.write(f'step={step}: avg_return={float(avg_return):.2f}')
             train_checkpointer.save(global_step)
             tqdm.write(f'Checkpoint saved at step {step}')
@@ -205,8 +214,10 @@ def train(config_path='config.json'):
     final_path = os.path.join(policy_base, 'final')
     PolicySaver(tf_agent.policy).save(final_path)
 
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', default='config.json', help='Path to config JSON')
+    parser.add_argument('--config', default='config.json',
+                        help='Path to config JSON')
     args = parser.parse_args()
     train(config_path=args.config)

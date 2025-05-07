@@ -6,11 +6,13 @@ import numba
 # Cache for Perlin gradients keyed by (res_x, res_y, seed)
 _perlin_gradients_cache = {}
 
+
 def fade(t):
     """
     Fade function for Perlin noise.
     """
     return 6*t**5 - 15*t**4 + 10*t**3
+
 
 def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     """
@@ -106,10 +108,12 @@ def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz, bedrock=0):
                     map_arr[yi, xj] = intr
     return removed
 
+
 class HeightMap:
     """
     Heightmap representation using a 2D numpy array.
     """
+
     def __init__(self, width, height, scale=(4, 4), amplitude=1.0,
                  tool_radius=5, seed=None, bedrock=0.0):
         """
@@ -132,7 +136,8 @@ class HeightMap:
         )
         self.scale = scale
         self.amplitude = amplitude
-        self.map = generate_perlin_noise_2d((height, width), scale, amplitude, seed)
+        self.map = generate_perlin_noise_2d(
+            (height, width), scale, amplitude, seed)
         # Running sum and count for fast mean-centered diff
         self._size = self.width * self.height
         self._sum = float(np.sum(self.map))
@@ -144,7 +149,7 @@ class HeightMap:
         """
         # Use JIT-accelerated carve
         removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
-                                  self.tool_radius, x, y, dz, self.bedrock)
+                                   self.tool_radius, x, y, dz, self.bedrock)
         # Update running sum for fast mean recompute
         self._sum -= removed
         return removed
@@ -152,8 +157,10 @@ class HeightMap:
     def apply_press_abs(self, x, y, z_abs, dz_rel):
         # Clamp z_abs not to exceed current map max (no effect)
         # Determine center pixel
-        cy = int(np.clip(round(y), self.tool_radius, self.height - 1 - self.tool_radius))
-        cx = int(np.clip(round(x), self.tool_radius, self.width  - 1 - self.tool_radius))
+        cy = int(np.clip(round(y), self.tool_radius,
+                 self.height - 1 - self.tool_radius))
+        cx = int(np.clip(round(x), self.tool_radius,
+                 self.width - 1 - self.tool_radius))
         h_center = float(self.map[cy, cx])
 
         tip_final = max(z_abs - dz_rel, self.bedrock)
@@ -255,6 +262,7 @@ class HeightMap:
         # diff -= diff.min()
         return diff
 
+
 if __name__ == '__main__':
-    test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40)
+    test = HeightMap(width=400, height=400, scale=(2, 2), amplitude=40)
     print(np.max(test.map))

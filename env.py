@@ -6,6 +6,7 @@ from heightmap import HeightMap
 
 import matplotlib.pyplot as plt
 
+
 class SandShapingEnv(py_environment.PyEnvironment):
     def __init__(self,
                  width=256,
@@ -27,7 +28,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._inv_amplitude_max = 1.0 / self._amplitude_range[1]
-        self._amp_max = self._amplitude_range[1]  # cache to avoid repeated index lookups
+        # cache to avoid repeated index lookups
+        self._amp_max = self._amplitude_range[1]
         # Penalty coefficient per unit volume removed
         self._vol_penalty = 0.1
         # Fixed penalty for presses that change nothing
@@ -112,7 +114,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Sample new substrate
         scale_x = np.random.uniform(self._scale_range[0], self._scale_range[1])
         scale_y = np.random.uniform(self._scale_range[0], self._scale_range[1])
-        amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        amplitude = np.random.uniform(
+            self._amplitude_range[0], self._amplitude_range[1])
         self._env_map = HeightMap(self._width,
                                   self._height,
                                   scale=(scale_x, scale_y),
@@ -120,9 +123,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                   tool_radius=self._tool_radius)
 
         # Sample new target patch
-        tgt_scale_x = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
-        tgt_scale_y = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
-        tgt_amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        tgt_scale_x = np.random.uniform(
+            self._target_scale_range[0], self._target_scale_range[1])
+        tgt_scale_y = np.random.uniform(
+            self._target_scale_range[0], self._target_scale_range[1])
+        tgt_amplitude = np.random.uniform(
+            self._amplitude_range[0], self._amplitude_range[1])
         self._target_map = HeightMap(self._patch_width,
                                      self._patch_height,
                                      scale=(tgt_scale_x, tgt_scale_y),
@@ -151,11 +157,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Parse action
         x_norm, y_norm, z_norm, dz_norm = action
 
-        x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
+        x = self._tool_radius + x_norm * (self._width - 2 * self._tool_radius)
         y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
 
         # Absolute tool tip height in world Z
-        z_abs  = z_norm  * self._env_map.amplitude + self._env_map.bedrock
+        z_abs = z_norm * self._env_map.amplitude + self._env_map.bedrock
         dz_rel = dz_norm * (0.66 * self._env_map.amplitude)
 
         # Compute pre-press global error
