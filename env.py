@@ -19,6 +19,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  max_steps=100,
                  error_mode='l2',
                  huber_delta=1.0,
+                 alpha=0.5,
+                 progress_only=True,
                  debug=False):
         self.debug = debug
         self._width = width
@@ -37,6 +39,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._no_touch_penalty = 0.1
         self._tool_radius = tool_radius
         self._max_steps = max_steps
+        self._huber_delta = huber_delta
+        self._alpha = alpha
+        self._progress_only = progress_only
 
         # Action spec: [x, y, z_abs, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
@@ -186,10 +191,28 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff_after = self._env_map.difference(self._target_map)
         err_after = self._compute_error(diff_after)
 
-        # Base reward is reduction in global error
-        raw_reward = err_before - err_after
-        # Subtract a cost proportional to the volume removed
-        raw_reward -= self._vol_penalty * removed
+        # Mix global and local improvements
+        delta_glob = err_before - err_after
+        # Compute local RMSE before/after within tool radius
+        cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
+        cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
+        coords = np.indices(diff_before.shape)
+        mask_local = (coords[0] - cy)**2 + (coords[1] - cx)**2 <= self._tool_radius**2
+        loc_err_before = np.sqrt(np.mean(diff_before[mask_local]**2))
+        loc_err_after  = np.sqrt(np.mean(diff_after[mask_local]**2))
+        delta_loc = loc_err_before - loc_err_after
+
+        # Combine
+        raw_improve = self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
+        # Subtract volume penalty
+        raw_improve -= self._vol_penalty * removed
+
+        # Progress-only clipping
+        if self._progress_only:
+            raw_reward = max(0.0, raw_improve)
+        else:
+            raw_reward = raw_improve
+
         # Penalize no-op presses
         if not touched:
             raw_reward -= self._no_touch_penalty
