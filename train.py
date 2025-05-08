@@ -43,12 +43,12 @@ def compute_avg_return(environment, policy, num_episodes=10):
 def train(vis_interval=50, num_parallel_envs=8):
     # Hyperparameters
     num_iterations = 200000
-    collect_steps_per_iteration = 1
+    collect_steps_per_iteration = 5
     replay_buffer_capacity = 2048
     batch_size = 32
     learning_rate = 1e-3
     gamma = 0.99
-    eval_interval = 5000
+    eval_interval = 10000
     num_eval_episodes = 5
     warmup_batches = batch_size // num_parallel_envs
 
@@ -150,7 +150,7 @@ def train(vis_interval=50, num_parallel_envs=8):
         collect_driver.run()
 
     if vis_interval > 0:
-        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(9, 6))
+        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(12, 9))
         cbars = [None] * 6  # one colorbar placeholder per subplot
 
     @function
@@ -164,7 +164,7 @@ def train(vis_interval=50, num_parallel_envs=8):
         vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
             tqdm.write(f'step {step}: train_loss = {float(train_loss):.4f}')
-        if vis_interval > 0 and step % vis_interval == 0:
+        if step == 1 or (vis_interval > 0 and step % vis_interval == 0):
             # Compute maps and observation
             h = vis_env._env_map.map
             t = vis_env._target_map.map
@@ -234,7 +234,7 @@ def train(vis_interval=50, num_parallel_envs=8):
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=100,
+    parser.add_argument('--vis_interval', type=int, default=1000,
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')
