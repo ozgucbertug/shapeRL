@@ -18,6 +18,7 @@ from tqdm.auto import tqdm, trange
 
 from tf_agents.system.system_multiprocessing import handle_main
 import os
+from matplotlib import colors
 
 def sample_random_action(spec):
     return np.random.uniform(low=spec.minimum,
@@ -149,9 +150,8 @@ def train(vis_interval=50, num_parallel_envs=8):
         collect_driver.run()
 
     if vis_interval > 0:
-        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(15, 10))
-        # Prepare shared colorbars for each column
-        cbars = [None, None, None]
+        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(9, 6))
+        cbars = [None] * 6  # one colorbar placeholder per subplot
 
     @function
     def train_step():
@@ -171,43 +171,52 @@ def train(vis_interval=50, num_parallel_envs=8):
             diff = vis_env._env_map.difference(vis_env._target_map)
             obs = vis_env._build_observation(diff, h, t)
 
+            # Prepare limits and norms
+            hmin, hmax = h.min(), h.max()
+            tmin, tmax = t.min(), t.max()
+            dlim = max_amp / 2
+            norm_diff = colors.TwoSlopeNorm(vcenter=0, vmin=-dlim, vmax=dlim)
+
             # First row: raw maps
-            # Env raw
-            vmin, vmax = h.min(), h.max()
-            ax = axes_vis[0, 0]
-            ax.clear()
-            ax.imshow(h - np.mean(h), cmap='viridis')
-            ax.set_title(f'Env @ step {step}\nmin:{vmin:.1f}, max:{vmax:.1f}')
-            # Target raw
-            vmin, vmax = t.min(), t.max()
-            ax = axes_vis[0, 1]
-            ax.clear()
-            ax.imshow(t - np.mean(t), cmap='viridis')
-            ax.set_title(f'Target\nmin:{vmin:.1f}, max:{vmax:.1f}')
-            # Difference raw
-            vmin, vmax = diff.min(), diff.max()
-            ax = axes_vis[0, 2]
-            ax.clear()
-            ax.imshow(diff, cmap='turbo', vmin=-max_amp/2, vmax=max_amp/2)
-            ax.set_title(f'Diff raw\nmin:{vmin:.1f}, max:{vmax:.1f}, rmse={np.sqrt(np.sum(diff**2)):.1f}')
+            # Diff raw (col 0)
+            ax0 = axes_vis[0, 0]; ax0.clear()
+            im0 = ax0.imshow(diff, cmap='turbo', norm=norm_diff)
+            ax0.set_title(f'Diff raw\nmin:{diff.min():.1f}, max:{diff.max():.1f}, rmse={np.sqrt(np.sum(diff**2)):.1f}')
+
+            # Env height raw (col 1)
+            ax1 = axes_vis[0, 1]; ax1.clear()
+            im1 = ax1.imshow(h, cmap='viridis')
+            ax1.set_title(f'Env height @ step {step}\nmin:{hmin:.1f}, max:{hmax:.1f}')
+
+            # Target height raw (col 2)
+            ax2 = axes_vis[0, 2]; ax2.clear()
+            im2 = ax2.imshow(t, cmap='viridis')
+            ax2.set_title(f'Target height\nmin:{tmin:.1f}, max:{tmax:.1f}')
 
             # Second row: observation channels
-            channel_names = ['difference', 'current height', 'target height']
-            for i, name in enumerate(channel_names):
-                ax = axes_vis[1, i]
-                ax.clear()
-                im = ax.imshow(obs[..., i], cmap='turbo',
-                               vmin=obs[..., i].min(), vmax=obs[..., i].max())
-                ax.set_title(f'{name} channel\n(step {step})')
+            # Difference channel
+            ax = axes_vis[1, 0]; ax.clear()
+            im3 = ax.imshow(obs[..., 0], cmap='turbo')
+            ax.set_title(f'Difference channel\n(step {step})')
 
-            # Update or create shared colorbars per column
-            for i in range(3):
-                im = axes_vis[1, i].images[0]
-                if cbars[i] is None:
-                    cbars[i] = fig_vis.colorbar(im, ax=axes_vis[:, i], label='value')
+            # Current height channel
+            ax = axes_vis[1, 1]; ax.clear()
+            im4 = ax.imshow(obs[..., 1], cmap='viridis')
+            ax.set_title(f'Current height channel\n(step {step})')
+
+            # Target height channel
+            ax = axes_vis[1, 2]; ax.clear()
+            im5 = ax.imshow(obs[..., 2], cmap='viridis')
+            ax.set_title(f'Target height channel\n(step {step})')
+
+            # Create or update one colorbar per subplot (avoid duplicates)
+            for idx, (ax, im) in enumerate(zip(axes_vis.flat, [im0, im1, im2, im3, im4, im5])):
+                if cbars[idx] is None:
+                    cbars[idx] = fig_vis.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
                 else:
-                    cbars[i].mappable = im
-                    cbars[i].update_normal(im)
+                    cbars[idx].mappable = im
+                    cbars[idx].update_normal(im)
+            fig_vis.tight_layout()
 
             if plt.get_fignums():
                 fig_vis.canvas.draw()
@@ -227,7 +236,7 @@ def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=11,
+    parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
