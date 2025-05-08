@@ -48,7 +48,7 @@ def train(vis_interval=50, num_parallel_envs=8):
     batch_size = 32
     learning_rate = 1e-3
     gamma = 0.99
-    eval_interval = 10000
+    eval_interval = 20000
     num_eval_episodes = 5
     warmup_batches = batch_size // num_parallel_envs
 
@@ -119,7 +119,7 @@ def train(vis_interval=50, num_parallel_envs=8):
         sample_batch_size=batch_size,
         num_steps=2,
         single_deterministic_pass=False
-    ).prefetch(50)
+    ).prefetch(2)
     iterator = iter(dataset)
 
     collect_driver = DynamicStepDriver(
