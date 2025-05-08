@@ -164,7 +164,7 @@ def train(vis_interval=50, num_parallel_envs=8):
         vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
             tqdm.write(f'step {step}: train_loss = {float(train_loss):.4f}')
-        if step == 1 or (vis_interval > 0 and step % vis_interval == 0):
+        if vis_interval > 0 and step % vis_interval == 0:
             # Compute maps and observation
             h = vis_env._env_map.map
             t = vis_env._target_map.map

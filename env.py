@@ -16,11 +16,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  target_scale_range=(2, 4),
                  amplitude_range=(10.0, 40.0),
                  tool_radius=20,
-                 max_steps=100,
+                 max_steps=200,
                  error_mode='l2',
                  huber_delta=1.0,
                  alpha=0.5,
-                 progress_only=True,
+                 progress_only=False,
                  debug=False):
         self.debug = debug
         self._width = width
@@ -211,7 +211,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if self._progress_only:
             raw_reward = max(0.0, raw_improve)
         else:
-            raw_reward = raw_improve
+            raw_reward = raw_improve #if raw_improve > 0 else -np.sqrt(np.abs(raw_improve))
 
         # Penalize no-op presses
         if not touched:
