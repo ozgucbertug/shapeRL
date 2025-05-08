@@ -46,7 +46,7 @@ def train(vis_interval=50, num_parallel_envs=8):
     collect_steps_per_iteration = 5
     replay_buffer_capacity = 2048
     batch_size = 32
-    learning_rate = 1e-3
+    learning_rate = 3e-4
     gamma = 0.99
     eval_interval = 20000
     num_eval_episodes = 5
@@ -234,7 +234,7 @@ def train(vis_interval=50, num_parallel_envs=8):
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=1000,
+    parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')

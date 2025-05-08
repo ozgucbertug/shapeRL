@@ -17,6 +17,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  amplitude_range=(10.0, 40.0),
                  tool_radius=20,
                  max_steps=100,
+                 error_mode='l2',
+                 huber_delta=1.0,
                  debug=False):
         self.debug = debug
         self._width = width
@@ -26,7 +28,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._scale_range = scale_range
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
-        self._inv_amplitude_max = 1.0 / self._amplitude_range[1]
         self._amp_max = self._amplitude_range[1]  # cache to avoid repeated index lookups
         # Penalty coefficient per unit volume removed
         self._vol_penalty = 0.1
@@ -55,6 +56,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         )
 
         self._episode_ended = False
+        self._error_mode = error_mode
+        self._huber_delta = huber_delta
+
         self._env_map = None
         self._target_map = None
 
@@ -108,6 +112,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._first_obs_shown = True
         return obs
 
+    def _compute_error(self, diff):
+        """
+        Compute global error according to the selected mode.
+        """
+        if self._error_mode == 'huber':
+            d = np.abs(diff)
+            mask = d <= self._huber_delta
+            return np.sum(np.where(mask,
+                                   0.5 * diff**2,
+                                   self._huber_delta * (d - 0.5 * self._huber_delta)))
+        elif self._error_mode == 'l2':
+            return np.sqrt(np.sum(diff**2))
+
     def _reset(self):
         # Sample new substrate
         scale_x = np.random.uniform(self._scale_range[0], self._scale_range[1])
@@ -135,7 +152,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Compute initial difference and normalize to [-1,1]
         diff = self._env_map.difference(self._target_map)
         # Compute initial total error for reward normalization
-        self._initial_error = np.sqrt(np.sum(np.square(diff)))
+        self._initial_error = self._compute_error(diff)
         if self._initial_error == 0:
             self._initial_error = 1.0
         # Build 3-channel observation:
@@ -160,14 +177,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Compute pre-press global error
         diff_before = self._env_map.difference(self._target_map)
-        err_before = np.sqrt(np.sum(np.square(diff_before)))
+        err_before = self._compute_error(diff_before)
 
         # Apply press and get carved volume
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Compute post-press global error
         diff_after = self._env_map.difference(self._target_map)
-        err_after = np.sqrt(np.sum(np.square(diff_after)))
+        err_after = self._compute_error(diff_after)
 
         # Base reward is reduction in global error
         raw_reward = err_before - err_after
