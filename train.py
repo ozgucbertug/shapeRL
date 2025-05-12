@@ -44,13 +44,12 @@ def train(vis_interval=50, num_parallel_envs=8):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 5
-    replay_buffer_capacity = 2048
-    batch_size = 32
+    replay_buffer_capacity = 50000
+    batch_size = 256
     learning_rate = 3e-4
     gamma = 0.99
     eval_interval = 20000
     num_eval_episodes = 5
-    warmup_batches = batch_size // num_parallel_envs
 
 
 
@@ -71,6 +70,8 @@ def train(vis_interval=50, num_parallel_envs=8):
 
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
+    # Automatic target entropy for SAC
+    target_entropy = -float(np.prod(action_spec.shape))
     actor_net = actor_distribution_network.ActorDistributionNetwork(
         input_tensor_spec=observation_spec, 
         output_tensor_spec=action_spec,
@@ -99,6 +100,7 @@ def train(vis_interval=50, num_parallel_envs=8):
         td_errors_loss_fn=tf.math.squared_difference,
         gamma=gamma,
         reward_scale_factor=1.0,
+        target_entropy=target_entropy,
         train_step_counter=global_step
     )
     tf_agent.initialize()
@@ -128,6 +130,10 @@ def train(vis_interval=50, num_parallel_envs=8):
         observers=[replay_buffer.add_batch],
         num_steps=collect_steps_per_iteration
     )
+    # Warm-up replay buffer with random actions
+    warmup_steps = 1000
+    for _ in range(warmup_steps):
+        collect_driver.run()
 
     train_metrics = [
         tf_metrics.NumberOfEpisodes(),
@@ -146,8 +152,6 @@ def train(vis_interval=50, num_parallel_envs=8):
     )
     train_checkpointer.initialize_or_restore()
 
-    for _ in range(warmup_batches):
-        collect_driver.run()
 
     if vis_interval > 0:
         fig_vis, axes_vis = plt.subplots(2, 3, figsize=(12, 9))
@@ -236,7 +240,7 @@ def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=6,
+    parser.add_argument('--num_envs', type=int, default=4,
                         help='Number of parallel environments for training')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
