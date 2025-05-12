@@ -66,7 +66,7 @@ def train(vis_interval=50, num_parallel_envs=8):
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
     # Network architecture
-    conv_layer_params = ((32, 3, 2), (64, 3, 2))
+    conv_layer_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
     fc_layer_params = (256, 128)
 
     observation_spec = train_env.observation_spec()

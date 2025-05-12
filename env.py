@@ -8,10 +8,10 @@ import matplotlib.pyplot as plt
 
 class SandShapingEnv(py_environment.PyEnvironment):
     def __init__(self,
-                 width=256,
-                 height=256,
-                 patch_width=256,
-                 patch_height=256,
+                 width=128,
+                 height=128,
+                 patch_width=128,
+                 patch_height=128,
                  scale_range=(1, 2),
                  target_scale_range=(2, 4),
                  amplitude_range=(10.0, 40.0),

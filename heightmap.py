@@ -27,7 +27,7 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     res_1 = int(res[1])
 
     xs = np.linspace(0, res_0, width, endpoint=False)
-    ys = np.linspace(0, res_1, height, endpoint=False)
+    ys = np.linspace(res_1, 0, height, endpoint=False)
     xv, yv = np.meshgrid(xs, ys)
     xi = np.floor(xv).astype(int)
     yi = np.floor(yv).astype(int)
@@ -130,6 +130,8 @@ class HeightMap:
         self._press_offset[self._press_mask] = (
             r - np.sqrt(r*r - self._press_dist2[self._press_mask])
         )
+        # Buffer for per-call intrusion heights to avoid reallocating
+        self._z_int = np.empty_like(self._press_offset)
         self.scale = scale
         self.amplitude = amplitude
         self.map = generate_perlin_noise_2d((height, width), scale, amplitude, seed)
@@ -182,6 +184,10 @@ class HeightMap:
         cy = int(np.clip(round(y), r, self.height - 1 - r))
         cx = int(np.clip(round(x), r, self.width - 1 - r))
         h_center = self.map[cy, cx]
+        # Precompute intrusion heights once per call using preallocated buffer
+        intr_offset = h_center - dz
+        np.add(self._press_offset, intr_offset, out=self._z_int)
+        np.maximum(self._z_int, self.bedrock, out=self._z_int)
 
         # Compute window bounds
         y0, y1 = cy - r, cy + r + 1
@@ -192,11 +198,10 @@ class HeightMap:
             sub = self.map[y0:y1, x0:x1]
             mask = self._press_mask
             # Compute per-pixel intrusion heights
-            z_int = h_center - dz + self._press_offset
-            z_int = np.maximum(z_int, self.bedrock)   # clamp
+            # z_int = h_center - dz + self._press_offset
+            # z_int = np.maximum(z_int, self.bedrock)   # clamp
             old_vals = sub[mask]
-            new_vals = np.minimum(old_vals, z_int[mask])
-            removed = np.sum(old_vals - new_vals)
+            new_vals = np.minimum(old_vals, self._z_int[mask])
             sub[mask] = new_vals
             self.map[y0:y1, x0:x1] = sub
             # Update running sum for fast mean recompute
@@ -213,10 +218,12 @@ class HeightMap:
             mask_sub = self._press_mask[off_y0:off_y1, off_x0:off_x1]
             offset_sub = self._press_offset[off_y0:off_y1, off_x0:off_x1]
             # Compute per-pixel intrusion heights
-            z_int = h_center - dz + offset_sub
-            z_int = np.maximum(z_int, self.bedrock)   # clamp
+            # z_int = h_center - dz + offset_sub
+            # z_int = np.maximum(z_int, self.bedrock)   # clamp
+            # Slice the precomputed intrusion buffer for this subwindow
+            z_int_sub = self._z_int[off_y0:off_y1, off_x0:off_x1]
             old_vals = sub[mask_sub]
-            new_vals = np.minimum(old_vals, z_int[mask_sub])
+            new_vals = np.minimum(old_vals, z_int_sub[mask_sub])
             removed = np.sum(old_vals - new_vals)
             sub[mask_sub] = new_vals
             self.map[y0c:y1c, x0c:x1c] = sub
