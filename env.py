@@ -18,8 +18,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  amplitude_range=(10.0, 40.0),
                  tool_radius=20,
                  max_steps=200,
-                 error_mode='l2',
-                 huber_delta=1.0,
                  alpha=0.5,
                  progress_only=False,
                  debug=False):
@@ -40,7 +38,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._no_touch_penalty = 0.1
         self._tool_radius = tool_radius
         self._max_steps = max_steps
-        self._huber_delta = huber_delta
         self._alpha = alpha
         self._progress_only = progress_only
 
@@ -62,8 +59,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         )
 
         self._episode_ended = False
-        self._error_mode = error_mode
-        self._huber_delta = huber_delta
 
         self._env_map = None
         self._target_map = None
@@ -118,19 +113,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._first_obs_shown = True
         return obs
 
-    def _compute_error(self, diff):
-        """
-        Compute global error according to the selected mode.
-        """
-        if self._error_mode == 'huber':
-            d = np.abs(diff)
-            mask = d <= self._huber_delta
-            return np.sum(np.where(mask,
-                                   0.5 * diff**2,
-                                   self._huber_delta * (d - 0.5 * self._huber_delta)))
-        elif self._error_mode == 'l2':
-            return np.sqrt(np.sum(diff**2))
-
     def _reset(self):
         # Sample new substrate
         scale_x = np.random.uniform(self._scale_range[0], self._scale_range[1])
@@ -158,10 +140,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Compute initial difference and normalize to [-1,1]
         diff = self._env_map.difference(self._target_map)
-        # Compute initial total error for reward normalization
-        self._initial_error = self._compute_error(diff)
-        if self._initial_error == 0:
-            self._initial_error = 1.0
         # Build 3-channel observation:
         h = self._env_map.map
         t = self._target_map.map
@@ -178,40 +156,34 @@ class SandShapingEnv(py_environment.PyEnvironment):
         x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
         y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
 
-        # Absolute tool tip height in world Z
-        z_abs  = z_norm  * (self._env_map.amplitude + self._env_map.bedrock)
+        # Absolute tool‑tip height in world Z
+        z_abs = z_norm * (self._env_map.amplitude + self._env_map.bedrock_offset)
         dz_rel = dz_norm * (0.66 * self._env_map.amplitude)
 
-        # Compute pre-press global error
+        # Local RMSE before the press
         diff_before = self._env_map.difference(self._target_map)
-        err_before = self._compute_error(diff_before)
-
-        # Apply press and get carved volume
-        removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
-
-        # Compute post-press global error
-        diff_after = self._env_map.difference(self._target_map)
-        err_after = self._compute_error(diff_after)
-
-        # Mix global and local improvements
-        delta_glob = err_before - err_after
-        # Compute local RMSE before/after within tool radius
         cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
         cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
         coords = np.indices(diff_before.shape)
         mask_local = (coords[0] - cy)**2 + (coords[1] - cx)**2 <= self._tool_radius**2
         loc_err_before = np.sqrt(np.mean(diff_before[mask_local]**2))
-        loc_err_after  = np.sqrt(np.mean(diff_after[mask_local]**2))
-        delta_loc = loc_err_before - loc_err_after
 
-        # Reward based solely on local RMSE improvement
-        reward = delta_loc
+        # Apply press and measure removed volume
+        removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
+
+        # Local RMSE after the press
+        diff_after = self._env_map.difference(self._target_map)
+        loc_err_after = np.sqrt(np.mean(diff_after[mask_local]**2))
+
+        # Reward = reduction in local RMSE
+        reward = loc_err_before - loc_err_after
+
+        # Log to TensorBoard
+        tf.summary.scalar('env/removed_volume', removed, step=self._step_count)
+        tf.summary.scalar('env/touched_flag', float(touched), step=self._step_count)
+        tf.summary.scalar('env/delta_local', reward, step=self._step_count)
 
         self._step_count += 1
-        # Log environment metrics to TensorBoard
-        # tf.summary.scalar('env/raw_reward', raw_reward, step=self._step_count)
-        # tf.summary.scalar('env/error_before', err_before, step=self._step_count)
-        # tf.summary.scalar('env/error_after', err_after, step=self._step_count)
 
         h = self._env_map.map
         t = self._target_map.map
