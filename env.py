@@ -1,4 +1,5 @@
 import numpy as np
+import tensorflow as tf
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
@@ -203,25 +204,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
         loc_err_after  = np.sqrt(np.mean(diff_after[mask_local]**2))
         delta_loc = loc_err_before - loc_err_after
 
-        # Combine
-        raw_improve = self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
-        # Subtract volume penalty
-        raw_improve -= self._vol_penalty * removed
-
-        # Progress-only clipping
-        if self._progress_only:
-            raw_reward = max(0.0, raw_improve)
-        else:
-            raw_reward = raw_improve #if raw_improve > 0 else -np.sqrt(np.abs(raw_improve))
-
-        # Penalize no-op presses
-        if not touched:
-            raw_reward -= self._no_touch_penalty
-
-        # Normalize and clip reward
-        reward = raw_reward / self._initial_error
+        # Reward based solely on local RMSE improvement
+        raw_reward = delta_loc
+        reward = raw_reward
 
         self._step_count += 1
+        # Log environment metrics to TensorBoard
+        tf.summary.scalar('env/removed_volume', removed, step=self._step_count)
+        tf.summary.scalar('env/touched_flag', float(touched), step=self._step_count)
+        tf.summary.scalar('env/delta_global', delta_glob, step=self._step_count)
+        tf.summary.scalar('env/delta_local', delta_loc, step=self._step_count)
+        tf.summary.scalar('env/raw_reward', raw_reward, step=self._step_count)
+        tf.summary.scalar('env/error_before', err_before, step=self._step_count)
+        tf.summary.scalar('env/error_after', err_after, step=self._step_count)
 
         h = self._env_map.map
         t = self._target_map.map
