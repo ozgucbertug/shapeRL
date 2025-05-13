@@ -178,7 +178,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
 
         # Absolute tool tip height in world Z
-        z_abs  = z_norm  * self._env_map.amplitude + self._env_map.bedrock
+        z_abs  = z_norm  * (self._env_map.amplitude + self._env_map.bedrock)
         dz_rel = dz_norm * (0.66 * self._env_map.amplitude)
 
         # Compute pre-press global error

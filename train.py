@@ -45,8 +45,8 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 5
-    replay_buffer_capacity = 16384
-    batch_size = 256
+    replay_buffer_capacity = 4096
+    batch_size = 128
     learning_rate = 3e-4
     gamma = 0.99
     eval_interval = 10000
