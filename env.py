@@ -205,18 +205,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         delta_loc = loc_err_before - loc_err_after
 
         # Reward based solely on local RMSE improvement
-        raw_reward = delta_loc
-        reward = raw_reward
+        reward = delta_loc
 
         self._step_count += 1
         # Log environment metrics to TensorBoard
-        tf.summary.scalar('env/removed_volume', removed, step=self._step_count)
-        tf.summary.scalar('env/touched_flag', float(touched), step=self._step_count)
-        tf.summary.scalar('env/delta_global', delta_glob, step=self._step_count)
-        tf.summary.scalar('env/delta_local', delta_loc, step=self._step_count)
-        tf.summary.scalar('env/raw_reward', raw_reward, step=self._step_count)
-        tf.summary.scalar('env/error_before', err_before, step=self._step_count)
-        tf.summary.scalar('env/error_after', err_after, step=self._step_count)
+        # tf.summary.scalar('env/raw_reward', raw_reward, step=self._step_count)
+        # tf.summary.scalar('env/error_before', err_before, step=self._step_count)
+        # tf.summary.scalar('env/error_after', err_after, step=self._step_count)
 
         h = self._env_map.map
         t = self._target_map.map
