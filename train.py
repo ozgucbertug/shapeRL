@@ -178,9 +178,9 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
             train_loss_hist.append((step, loss_val))
             tf.summary.scalar('train/loss', loss_val, step=step)
             # Log SAC internals
-            tf.summary.scalar('train/critic_loss', train_info.critic_loss, step=step)
-            tf.summary.scalar('train/actor_loss',  train_info.actor_loss,  step=step)
-            tf.summary.scalar('train/alpha_loss',  train_info.alpha_loss,  step=step)
+            tf.summary.scalar('train/critic_loss', train_info.extra.critic_loss, step=step)
+            tf.summary.scalar('train/actor_loss',  train_info.extra.actor_loss,  step=step)
+            tf.summary.scalar('train/alpha_loss',  train_info.extra.alpha_loss,  step=step)
             # Log replay buffer occupancy
             tf.summary.scalar('replay/size', replay_buffer.num_frames(), step=step)
             for m in train_metrics:
