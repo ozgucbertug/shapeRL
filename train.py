@@ -300,7 +300,7 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=100,
+    parser.add_argument('--vis_interval', type=int, default=0,
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')
