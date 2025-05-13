@@ -132,7 +132,7 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
     iterator = iter(dataset)
 
     train_metrics = [
-        tf_metrics.NumberOfEpisodes(),                 # no batch_size arg
+        tf_metrics.NumberOfEpisodes(),
         tf_metrics.EnvironmentSteps(),
         tf_metrics.AverageReturnMetric(batch_size=num_parallel_envs),
         tf_metrics.AverageEpisodeLengthMetric(batch_size=num_parallel_envs),
@@ -176,15 +176,10 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
             loss_val = float(train_loss)
             tqdm.write(f'step {step}: train_loss = {loss_val:.4f}')
             train_loss_hist.append((step, loss_val))
-            tf.summary.scalar('train/loss', loss_val, step=step)
-            # Log SAC internals
-            tf.summary.scalar('train/critic_loss', train_info.extra.critic_loss, step=step)
-            tf.summary.scalar('train/actor_loss',  train_info.extra.actor_loss,  step=step)
-            tf.summary.scalar('train/alpha_loss',  train_info.extra.alpha_loss,  step=step)
+            tf.summary.scalar('Losses/total_loss', loss_val, step=step)
             # Log replay buffer occupancy
             tf.summary.scalar('replay/size', replay_buffer.num_frames(), step=step)
             for m in train_metrics:
-                tf.summary.scalar(f'train/{m.name}', m.result(), step=step)
                 m.reset()
         if vis_interval > 0 and step % vis_interval == 0:
             # Compute maps and observation
