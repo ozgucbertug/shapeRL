@@ -111,9 +111,10 @@ class HeightMap:
     Heightmap representation using a 2D numpy array.
     """
     def __init__(self, width, height, scale=(4, 4), amplitude=1.0,
-                 tool_radius=5, seed=None, bedrock=0.0):
+                 tool_radius=5, seed=None, bedrock_offset=0.0):
         """
         Initialize a heightmap with Perlin noise.
+        :param bedrock_offset: Vertical offset to shift the map (does not change clamp floor).
         """
         self.width = width
         self.height = height
@@ -134,11 +135,13 @@ class HeightMap:
         self._z_int = np.empty_like(self._press_offset)
         self.scale = scale
         self.amplitude = amplitude
-        self.map = generate_perlin_noise_2d((height, width), scale, amplitude, seed)
+        self.bedrock_offset = bedrock_offset
+        self.bedrock = 0.0
+        
+        self.map = generate_perlin_noise_2d((height, width), scale, amplitude, seed) + bedrock_offset
         # Running sum and count for fast mean-centered diff
         self._size = self.width * self.height
         self._sum = float(np.sum(self.map))
-        self.bedrock = bedrock
 
     def apply_press(self, x, y, dz):
         """
@@ -269,5 +272,5 @@ class HeightMap:
         return diff
 
 if __name__ == '__main__':
-    test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40)
-    print(np.max(test.map))
+    test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40, bedrock_offset=10)
+    print(np.min(test.map))

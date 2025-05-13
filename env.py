@@ -139,7 +139,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                   self._height,
                                   scale=(scale_x, scale_y),
                                   amplitude=amplitude,
-                                  tool_radius=self._tool_radius)
+                                  tool_radius=self._tool_radius,
+                                  bedrock_offset=30)
 
         # Sample new target patch
         tgt_scale_x = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
