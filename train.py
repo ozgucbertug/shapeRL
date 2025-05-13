@@ -19,6 +19,7 @@ from tqdm.auto import tqdm, trange
 from tf_agents.system.system_multiprocessing import handle_main
 import os
 from matplotlib import colors
+from datetime import datetime
 
 def sample_random_action(spec):
     return np.random.uniform(low=spec.minimum,
@@ -40,7 +41,7 @@ def compute_avg_return(environment, policy, num_episodes=10):
         total_return += episode_return
     return total_return / num_episodes
 
-def train(vis_interval=50, num_parallel_envs=8):
+def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 5
@@ -65,7 +66,7 @@ def train(vis_interval=50, num_parallel_envs=8):
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
     # Network architecture
-    conv_layer_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
+    conv_layer_params = ((32, 3, 2), (64, 3, 2))
     fc_layer_params = (256, 128)
 
     observation_spec = train_env.observation_spec()
@@ -105,12 +106,20 @@ def train(vis_interval=50, num_parallel_envs=8):
     )
     tf_agent.initialize()
 
-    log_interval = 1000
     checkpoint_dir = 'ckpts'
     policy_base    = 'policies'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(policy_base, exist_ok=True)
     policy_saver = PolicySaver(tf_agent.policy)
+    # ---- logging setup ----
+    log_root = 'logs'
+    os.makedirs(log_root, exist_ok=True)
+    logdir = os.path.join(log_root, datetime.now().strftime('%Y%m%d-%H%M%S'))
+    summary_writer = tf.summary.create_file_writer(logdir)
+    summary_writer.set_as_default()
+
+    train_loss_hist = []
+    eval_return_hist = []
 
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
@@ -124,23 +133,23 @@ def train(vis_interval=50, num_parallel_envs=8):
     ).prefetch(2)
     iterator = iter(dataset)
 
+    train_metrics = [
+        tf_metrics.NumberOfEpisodes(),                 # no batch_size arg
+        tf_metrics.EnvironmentSteps(),
+        tf_metrics.AverageReturnMetric(batch_size=num_parallel_envs),
+        tf_metrics.AverageEpisodeLengthMetric(batch_size=num_parallel_envs),
+    ]
+
     collect_driver = DynamicStepDriver(
         train_env,
         tf_agent.collect_policy,
-        observers=[replay_buffer.add_batch],
+        observers=[replay_buffer.add_batch] + train_metrics,
         num_steps=collect_steps_per_iteration
     )
     # Warm-up replay buffer with random actions
     warmup_steps = 1000
     for _ in range(warmup_steps):
         collect_driver.run()
-
-    train_metrics = [
-        tf_metrics.NumberOfEpisodes(),
-        tf_metrics.EnvironmentSteps(),
-        tf_metrics.AverageReturnMetric(),
-        tf_metrics.AverageEpisodeLengthMetric(),
-    ]
 
     train_checkpointer = Checkpointer(
         ckpt_dir=checkpoint_dir,
@@ -167,7 +176,13 @@ def train(vis_interval=50, num_parallel_envs=8):
         train_loss = train_step()
         vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
-            tqdm.write(f'step {step}: train_loss = {float(train_loss):.4f}')
+            loss_val = float(train_loss)
+            tqdm.write(f'step {step}: train_loss = {loss_val:.4f}')
+            train_loss_hist.append((step, loss_val))
+            tf.summary.scalar('train/loss', loss_val, step=step)
+            for m in train_metrics:
+                tf.summary.scalar(f'train/{m.name}', m.result(), step=step)
+                m.reset()
         if vis_interval > 0 and step % vis_interval == 0:
             # Compute maps and observation
             h = vis_env._env_map.map
@@ -228,8 +243,39 @@ def train(vis_interval=50, num_parallel_envs=8):
         if step % eval_interval == 0:
             avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
             tqdm.write(f'step={step}: avg_return={float(avg_return):.2f}')
+            eval_return_hist.append((step, float(avg_return)))
+            tf.summary.scalar('eval/avg_return', avg_return, step=step)
             train_checkpointer.save(global_step)
             tqdm.write(f'Checkpoint saved at step {step}')
+
+    # ---- save & plot logged metrics ----
+    metrics_path = os.path.join(logdir, 'metrics.npz')
+    np.savez(metrics_path,
+             steps_loss=np.array([s for s, _ in train_loss_hist]),
+             loss=np.array([v for _, v in train_loss_hist]),
+             steps_eval=np.array([s for s, _ in eval_return_hist]),
+             avg_return=np.array([v for _, v in eval_return_hist]))
+
+    if train_loss_hist and eval_return_hist:
+        fig, ax1 = plt.subplots(figsize=(8, 5))
+        steps_loss = [s for s, _ in train_loss_hist]
+        loss_vals = [v for _, v in train_loss_hist]
+        ax1.plot(steps_loss, loss_vals, label='Train loss')
+        ax1.set_xlabel('Environment steps')
+        ax1.set_ylabel('Train loss')
+
+        ax2 = ax1.twinx()
+        steps_eval = [s for s, _ in eval_return_hist]
+        ret_vals = [v for _, v in eval_return_hist]
+        ax2.plot(steps_eval, ret_vals, linestyle='--', label='Avg return')
+        ax2.set_ylabel('Average return')
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2)
+        fig.tight_layout()
+        fig.savefig(os.path.join(logdir, 'metrics.png'))
+        plt.close(fig)
 
     final_path = os.path.join(policy_base, 'final')
     PolicySaver(tf_agent.policy).save(final_path)
@@ -242,9 +288,12 @@ def main(_argv=None):
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=4,
                         help='Number of parallel environments for training')
+    parser.add_argument('--log_interval', type=int, default=100,
+                        help='Logging interval in environment steps')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
-          num_parallel_envs=args.num_envs)
+          num_parallel_envs=args.num_envs,
+          log_interval=args.log_interval)
 
 if __name__ == '__main__':
     handle_main(main)
