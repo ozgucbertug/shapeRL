@@ -166,16 +166,23 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
     def train_step():
         collect_driver.run()
         experience, _ = next(iterator)
-        return tf_agent.train(experience).loss
+        return tf_agent.train(experience)
 
     for step in trange(1, num_iterations + 1, desc='Training'):
-        train_loss = train_step()
+        train_info = train_step()
+        train_loss = train_info.loss
         vis_env.step(sample_random_action(vis_env.action_spec()))
         if step % log_interval == 0:
             loss_val = float(train_loss)
             tqdm.write(f'step {step}: train_loss = {loss_val:.4f}')
             train_loss_hist.append((step, loss_val))
             tf.summary.scalar('train/loss', loss_val, step=step)
+            # Log SAC internals
+            tf.summary.scalar('train/critic_loss', train_info.extra.critic_loss, step=step)
+            tf.summary.scalar('train/actor_loss',  train_info.extra.actor_loss,  step=step)
+            tf.summary.scalar('train/alpha_loss',  train_info.extra.alpha_loss,  step=step)
+            # Log replay buffer occupancy
+            tf.summary.scalar('replay/size', replay_buffer.num_frames(), step=step)
             for m in train_metrics:
                 tf.summary.scalar(f'train/{m.name}', m.result(), step=step)
                 m.reset()
@@ -232,6 +239,11 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
                     cbars[idx].mappable = im
                     cbars[idx].update_normal(im)
             fig_vis.tight_layout()
+
+            # Log map images for visual debugging
+            tf.summary.image('maps/diff',   diff[np.newaxis, ..., np.newaxis], step=step)
+            tf.summary.image('maps/env',    h  [np.newaxis, ..., np.newaxis], step=step)
+            tf.summary.image('maps/target', t  [np.newaxis, ..., np.newaxis], step=step)
 
             if plt.get_fignums():
                 fig_vis.canvas.draw()
