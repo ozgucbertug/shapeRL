@@ -244,10 +244,10 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
             obs_tgt  = obs[..., 2]
             # Normalize channels to [0,1] for tf.summary.image
             diff_norm = (obs_diff + 1.0) / 2.0
-            env_norm  = obs_env
-            tgt_norm  = obs_tgt
+            env_norm = (obs_env + 1.0) / 2.0
+            tgt_norm = (obs_tgt + 1.0) / 2.0
 
-            tf.summary.image('maps/diff',   obs_diff[np.newaxis, ..., np.newaxis], step=step)
+            tf.summary.image('maps/diff',   diff_norm[np.newaxis, ..., np.newaxis], step=step)
             tf.summary.image('maps/env',    env_norm [np.newaxis, ..., np.newaxis], step=step)
             tf.summary.image('maps/target', tgt_norm [np.newaxis, ..., np.newaxis], step=step)
 

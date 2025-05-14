@@ -83,31 +83,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
         -------
         obs : np.ndarray, float32, shape (H, W, 3), range [-1,1]
         """
-        s = 0.5 * self._amp_max          # symmetric squash for difference
-        scale_h = self._amp_max          # linear clip for height channels
+        # scale_d, scale_h picked once for the episode
+        scale_d = 0.5 * self._amp_max      # ½ of the maximum amplitude
+        scale_h = self._amp_max            #   maximum amplitude
 
-        # Apply sigmoid squashing to height channels to [0,1]
-        sigmoid_h = 1.0 / (1.0 + np.exp(-(h - h.mean()) / scale_h))
-        sigmoid_t = 1.0 / (1.0 + np.exp(-(t - t.mean()) / scale_h))
-        tanh_diff = np.tanh(diff / s)
-        obs = np.stack([
-            tanh_diff,
-            sigmoid_h,
-            sigmoid_t
-        ], axis=-1).astype(np.float32)
+        diff_signed = np.clip(diff / scale_d, -1.0, 1.0)           # (-1, 1)
+        env_norm    = np.clip((h - h.mean()) / scale_h, -1.0, 1.0) # (-1, 1)
+        tgt_norm    = np.clip((t - t.mean()) / scale_h, -1.0, 1.0) # (-1, 1)
 
-        # One‑time visualisation controlled by self.debug
-        if self.debug and not getattr(self, "_first_obs_shown", False):
-            channel_names = ['difference', 'current height', 'target height']
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            for i, name in enumerate(channel_names):
-                ax = axes[i]
-                im = ax.imshow(obs[..., i], cmap='turbo',
-                               vmin=obs[..., i].min(), vmax=obs[..., i].max())
-                ax.set_title(f'{name} channel (first obs)')
-                fig.colorbar(im, ax=ax, label='value')
-            plt.show(block=True)
-            self._first_obs_shown = True
+        obs = np.stack([diff_signed, env_norm, tgt_norm], axis=-1).astype(np.float32)
+
         return obs
 
     def _reset(self):
