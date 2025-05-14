@@ -162,6 +162,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Local RMSE before the press
         diff_before = self._env_map.difference(self._target_map)
+        err_before = np.sqrt(np.mean(diff_before**2))
         cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
         cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
         coords = np.indices(diff_before.shape)
@@ -174,9 +175,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Local RMSE after the press
         diff_after = self._env_map.difference(self._target_map)
         loc_err_after = np.sqrt(np.mean(diff_after[mask_local]**2))
-
-        # Reward = reduction in local RMSE
-        reward = loc_err_before - loc_err_after
+        err_after = np.sqrt(np.mean(diff_after**2))
+        delta_glob = err_before - err_after
+        delta_loc = loc_err_before - loc_err_after
+        
+        reward = self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
 
         # Log to TensorBoard
         tf.summary.scalar('env/removed_volume', removed, step=self._step_count)
