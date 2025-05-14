@@ -254,8 +254,8 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
             tqdm.write(f'step={step}: avg_return={float(avg_return):.2f}')
             eval_return_hist.append((step, float(avg_return)))
             tf.summary.scalar('eval/avg_return', avg_return, step=step)
-            train_checkpointer.save(global_step)
-            tqdm.write(f'Checkpoint saved at step {step}')
+            # train_checkpointer.save(global_step)
+            # tqdm.write(f'Checkpoint saved at step {step}')
 
     # ---- save & plot logged metrics ----
     metrics_path = os.path.join(logdir, 'metrics.npz')
@@ -293,7 +293,7 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=0,
+    parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
     parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')
