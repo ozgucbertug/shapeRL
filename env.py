@@ -30,16 +30,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._amp_max = self._amplitude_range[1]  # cache to avoid repeated index lookups
-        # Penalty coefficient per unit volume removed
-        self._vol_penalty = 0.1
-        # Fixed penalty for presses that change nothing
-        self._zero_penalty = 0.1
-        # Penalty for a press that contacts nothing
-        self._no_touch_penalty = 0.1
         self._tool_radius = tool_radius
         self._max_steps = max_steps
         self._alpha = alpha
-        self._progress_only = progress_only
 
         # Action spec: [x, y, z_abs, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
@@ -93,10 +86,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         s = 0.5 * self._amp_max          # symmetric squash for difference
         scale_h = self._amp_max          # linear clip for height channels
 
+        # Apply sigmoid squashing to height channels to [0,1]
+        sigmoid_h = 1.0 / (1.0 + np.exp(-(h - h.mean()) / scale_h))
+        sigmoid_t = 1.0 / (1.0 + np.exp(-(t - t.mean()) / scale_h))
+        tanh_diff = np.tanh(diff / s)
         obs = np.stack([
-            np.tanh(diff / s),
-            np.clip((h - h.mean()) / scale_h, -1.0, 1.0),
-            np.clip((t - t.mean()) / scale_h, -1.0, 1.0)
+            tanh_diff,
+            sigmoid_h,
+            sigmoid_t
         ], axis=-1).astype(np.float32)
 
         # One‑time visualisation controlled by self.debug
@@ -180,11 +177,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         delta_loc = loc_err_before - loc_err_after
         
         reward = self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
-
-        # Log to TensorBoard
-        tf.summary.scalar('env/removed_volume', removed, step=self._step_count)
-        tf.summary.scalar('env/touched_flag', float(touched), step=self._step_count)
-        tf.summary.scalar('env/delta_local', reward, step=self._step_count)
 
         self._step_count += 1
 

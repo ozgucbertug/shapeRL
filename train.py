@@ -237,12 +237,10 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
 
             # Log map images for visual debugging
             # Normalize maps to [0,1] for image logging
-            dmin, dmax = diff.min(), diff.max()
+            dmin, dmax = -1, 1
             diff_norm = (diff - dmin) / (dmax - dmin + 1e-8)
-            hmin, hmax = h.min(), h.max()
-            env_norm = (h - hmin) / (hmax - hmin + 1e-8)
-            tmin, tmax = t.min(), t.max()
-            tgt_norm = (t - tmin) / (tmax - tmin + 1e-8)
+            env_norm = h
+            tgt_norm = t
 
             tf.summary.image('maps/diff',   diff_norm[np.newaxis, ..., np.newaxis], step=step)
             tf.summary.image('maps/env',    env_norm [np.newaxis, ..., np.newaxis], step=step)
