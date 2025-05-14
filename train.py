@@ -238,11 +238,14 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
             # Log map images for visual debugging
             # Normalize maps to [0,1] for image logging
 
-            obs_diff, obs_env, obs_tgt = obs
-            dmin, dmax = -1, 1
-            diff_norm = (diff - dmin) / (dmax - dmin + 1e-8)
-            env_norm = obs_env
-            tgt_norm = obs_tgt
+            # Unpack observation channels from last dimension
+            obs_diff = obs[..., 0]
+            obs_env  = obs[..., 1]
+            obs_tgt  = obs[..., 2]
+            # Normalize channels to [0,1] for tf.summary.image
+            diff_norm = (obs_diff + 1.0) / 2.0
+            env_norm  = obs_env
+            tgt_norm  = obs_tgt
 
             tf.summary.image('maps/diff',   obs_diff[np.newaxis, ..., np.newaxis], step=step)
             tf.summary.image('maps/env',    env_norm [np.newaxis, ..., np.newaxis], step=step)
