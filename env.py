@@ -34,12 +34,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._max_steps = max_steps
         self._alpha = alpha
 
-        # Action spec: [x, y, z_abs, dz_rel]  all normalised to [0,1]
+        # Action spec: [x, y, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
-            shape=(4,),
+            shape=(3,),
             dtype=np.float32,
-            minimum=np.array([0, 0, 0, 0], dtype=np.float32),
-            maximum=np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32),
+            minimum=np.array([0, 0, 0], dtype=np.float32),
+            maximum=np.array([1.0, 1.0, 1.0], dtype=np.float32),
             name='action'
         )
 
@@ -133,20 +133,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return self._reset()
 
         # Parse action
-        x_norm, y_norm, z_norm, dz_norm = action
+        x_norm, y_norm, dz_norm = action
 
         x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
         y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
 
-        # Absolute tool‑tip height in world Z
-        z_abs = z_norm * (self._env_map.amplitude + self._env_map.bedrock_offset)
-        dz_rel = dz_norm * (0.66 * self._env_map.amplitude)
+        # Derive absolute tip height from current surface, then push down by dz_norm
+        cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
+        cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
+        h_center = float(self._env_map.map[cy, cx])
+        z_abs = h_center
+        dz_rel = dz_norm * (0.66 * self._tool_radius)
 
         # Local RMSE before the press
         diff_before = self._env_map.difference(self._target_map)
         err_before = np.sqrt(np.mean(diff_before**2))
-        cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
-        cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
         coords = np.indices(diff_before.shape)
         mask_local = (coords[0] - cy)**2 + (coords[1] - cx)**2 <= self._tool_radius**2
         loc_err_before = np.sqrt(np.mean(diff_before[mask_local]**2))
