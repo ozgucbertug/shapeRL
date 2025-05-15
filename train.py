@@ -276,15 +276,13 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
 # Main entry point for multiprocessing
 def main(_argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument('--vis_interval', type=int, default=100,
-                        help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=6,
-                        help='Number of parallel environments for training')
-    parser.add_argument('--checkpoint_interval', type=int, default=10000, help='Steps between checkpoint saves')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=5, help='Number of steps to collect per iteration')
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
+    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
+    parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
+    parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
           num_parallel_envs=args.num_envs,
