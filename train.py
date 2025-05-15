@@ -263,7 +263,7 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
                     f"[Eval @ {step}] ΔRMSE: {metrics['delta_rmse_mean']:.4f}, "
                     f"RelImprove: {metrics['rel_improve_mean']:.2%}, "
                 )
-            if step % checkpoint_interval == 0:
+            if checkpoint_interval > 0 and step % checkpoint_interval == 0:
                 train_checkpointer.save(global_step)
                 tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
     except KeyboardInterrupt:
