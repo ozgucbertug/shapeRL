@@ -22,27 +22,107 @@ import os
 from matplotlib import colors
 from datetime import datetime
 
+# --- Visualization function ---
+def visualize(fig, axes, cbars, env, step, max_amp):
+    """
+    Update the visual debugging plots for the given environment and step.
+    """
+    # Extract maps and observation
+    h = env._env_map.map
+    t = env._target_map.map
+    diff = env._env_map.difference(env._target_map)
+    obs = env._build_observation(diff, h, t)
+    # Prepare value ranges
+    hmin, hmax = h.min(), h.max()
+    tmin, tmax = t.min(), t.max()
+    dlim = max_amp / 2
+    norm_diff = colors.TwoSlopeNorm(vcenter=0, vmin=-dlim, vmax=dlim)
+    # Data, colormaps, and titles for subplots
+    channels = [diff, h, t, obs[..., 0], obs[..., 1], obs[..., 2]]
+    cmaps = ['turbo', 'viridis', 'viridis', 'turbo', 'viridis', 'viridis']
+    titles = [
+        f'Diff raw\nmin:{diff.min():.1f}, max:{diff.max():.1f}, rmse={np.sqrt(np.mean(diff**2)):.1f}',
+        f'Env height @ step {step}\nmin:{hmin:.1f}, max:{hmax:.1f}',
+        f'Target height\nmin:{tmin:.1f}, max:{tmax:.1f}',
+        'Diff channel',
+        'Env channel',
+        'Tgt channel',
+    ]
+    # Update each subplot
+    for idx, ax in enumerate(axes.flat):
+        ax.clear()
+        data = channels[idx]
+        cmap = cmaps[idx]
+        if idx == 0:
+            im = ax.imshow(data, cmap=cmap, norm=norm_diff)
+        else:
+            im = ax.imshow(data, cmap=cmap)
+        ax.set_title(titles[idx])
+        # Colorbar handling
+        if cbars[idx] is None:
+            cbars[idx] = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        else:
+            cbars[idx].mappable = im
+            cbars[idx].update_normal(im)
+    fig.tight_layout()
+
 def sample_random_action(spec):
     return np.random.uniform(low=spec.minimum,
                              high=spec.maximum).astype(np.float32)
 
-def compute_avg_return(environment, policy, num_episodes=10):
-    """Run a fixed number of episodes in `environment` using `policy`
-    and return the *Python float* average return.
-    """
-    total_return = 0.0
-    for _ in range(num_episodes):
-        time_step = environment.reset()
-        episode_return = 0.0
-        while not time_step.is_last():
-            action = policy.action(time_step).action
-            time_step = environment.step(action)
-            # Cast to float to detach from TF / NumPy
-            episode_return += float(time_step.reward)
-        total_return += episode_return
-    return total_return / num_episodes
 
-def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
+def compute_eval(env, policy, num_episodes=10):
+    """
+    Evaluate error-focused metrics over multiple episodes.
+    Returns a dict containing:
+      - init_rmse_mean, final_rmse_mean, delta_rmse_mean, rel_improve_mean, auc_rmse_mean, slope_rmse_mean
+      - and per-episode lists for each metric.
+    """
+    delta_rmses = []
+    rel_improves = []
+    auc_rmses = []
+    slopes = []
+    for _ in range(num_episodes):
+        time_step = env.reset()
+        # initial RMSE before any actions
+        diff0 = env._env_map.difference(env._target_map)
+        rmse0 = np.sqrt(np.mean(diff0**2))
+        # track RMSE over time
+        rmse_series = [rmse0]
+        while not time_step.is_last():
+            action_step = policy.action(time_step)
+            action = action_step.action
+            if hasattr(action, "numpy"):
+                action = action.numpy()
+            time_step = env.step(action)
+            diff = env._env_map.difference(env._target_map)
+            rmse_series.append(np.sqrt(np.mean(diff**2)))
+        # compute per-episode metrics
+        rmse_initial = rmse_series[0]
+        rmse_final = rmse_series[-1]
+        delta = rmse_initial - rmse_final
+        rel = delta / rmse_initial if rmse_initial > 0 else 0.0
+        auc = np.trapz(rmse_series)
+        steps = np.arange(len(rmse_series))
+        slope = np.polyfit(steps, rmse_series, 1)[0]
+        delta_rmses.append(delta)
+        rel_improves.append(rel)
+        auc_rmses.append(auc)
+        slopes.append(slope)
+    # aggregate means
+    metrics = {
+        'delta_rmse_mean': float(np.mean(delta_rmses)),
+        'rel_improve_mean': float(np.mean(rel_improves)),
+        'auc_rmse_mean': float(np.mean(auc_rmses)),
+        'slope_rmse_mean': float(np.mean(slopes)),
+        'delta_rmse_list': delta_rmses,
+        'rel_improve_list': rel_improves,
+        'auc_rmse_list': auc_rmses,
+        'slope_rmse_list': slopes,
+    }
+    return metrics
+
+def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint_interval=10000, seed=None):
     if seed is not None:
         random.seed(seed)
         np.random.seed(seed)
@@ -50,23 +130,21 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 5
-    replay_buffer_capacity = 4096
-    batch_size = 128
+    replay_buffer_capacity = 16384
+    batch_size = 256
     learning_rate = 3e-4
     gamma = 0.99
-    eval_interval = 10000
     num_eval_episodes = 5
-    warmup_batches = batch_size // num_parallel_envs
 
+    warmup_batches = int(np.ceil(batch_size / (collect_steps_per_iteration * num_parallel_envs)))
 
-
-    def make_env():
-        return SandShapingEnv()
-    train_py_env = ParallelPyEnvironment([make_env for _ in range(num_parallel_envs)])
-    eval_py_env  = SandShapingEnv()
-
-    vis_env = SandShapingEnv()
-    max_amp = vis_env._amplitude_range[1]
+    # Create seeded Python environments for training, evaluation, and visualization
+    env_fns = []
+    for idx in range(num_parallel_envs):
+        env_fns.append(lambda idx=idx: SandShapingEnv(seed=(seed + idx) if seed is not None else None))
+    train_py_env = ParallelPyEnvironment(env_fns)
+    eval_py_env = SandShapingEnv(seed=seed)
+    vis_env = SandShapingEnv(seed=(seed + num_parallel_envs) if seed is not None else None)
 
     train_env = tf_py_environment.TFPyEnvironment(train_py_env)
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
@@ -122,7 +200,6 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
     summary_writer.set_as_default()
 
     train_loss_hist = []
-    eval_return_hist = []
 
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
@@ -166,6 +243,7 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
     if vis_interval > 0:
         fig_vis, axes_vis = plt.subplots(2, 3, figsize=(12, 9))
         cbars = [None] * 6  # one colorbar placeholder per subplot
+        max_amp = vis_env._amplitude_range[1]
 
     @function
     def train_step():
@@ -177,124 +255,38 @@ def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
         train_info = train_step()
         train_loss = train_info.loss
         vis_env.step(sample_random_action(vis_env.action_spec()))
-        if step % log_interval == 0:
-            loss_val = float(train_loss)
-            tqdm.write(f'step {step}: train_loss = {loss_val:.4f}')
-            train_loss_hist.append((step, loss_val))
-            tf.summary.scalar('Losses/total_loss', loss_val, step=step)
-            # Log replay buffer occupancy
-            tf.summary.scalar('replay/size', replay_buffer.num_frames(), step=step)
-            for m in train_metrics:
-                m.reset()
         if vis_interval > 0 and step % vis_interval == 0:
-            # # Compute maps and observation
-            h = vis_env._env_map.map
-            t = vis_env._target_map.map
-            diff = vis_env._env_map.difference(vis_env._target_map)
-            obs = vis_env._build_observation(diff, h, t)
-
-            # # Prepare limits and norms
-            # hmin, hmax = h.min(), h.max()
-            # tmin, tmax = t.min(), t.max()
-            # dlim = max_amp / 2
-            # norm_diff = colors.TwoSlopeNorm(vcenter=0, vmin=-dlim, vmax=dlim)
-
-            # # First row: raw maps
-            # # Diff raw (col 0)
-            # ax0 = axes_vis[0, 0]; ax0.clear()
-            # im0 = ax0.imshow(diff, cmap='turbo', norm=norm_diff)
-            # ax0.set_title(f'Diff raw\nmin:{diff.min():.1f}, max:{diff.max():.1f}, rmse={np.sqrt(np.sum(diff**2)):.1f}')
-
-            # # Env height raw (col 1)
-            # ax1 = axes_vis[0, 1]; ax1.clear()
-            # im1 = ax1.imshow(h, cmap='viridis')
-            # ax1.set_title(f'Env height @ step {step}\nmin:{hmin:.1f}, max:{hmax:.1f}')
-
-            # # Target height raw (col 2)
-            # ax2 = axes_vis[0, 2]; ax2.clear()
-            # im2 = ax2.imshow(t, cmap='viridis')
-            # ax2.set_title(f'Target height\nmin:{tmin:.1f}, max:{tmax:.1f}')
-
-            # # Second row: observation channels
-            # # Difference channel
-            # ax = axes_vis[1, 0]; ax.clear()
-            # im3 = ax.imshow(obs[..., 0], cmap='turbo')
-            # ax.set_title(f'Difference channel)')
-
-            # # Current height channel
-            # ax = axes_vis[1, 1]; ax.clear()
-            # im4 = ax.imshow(obs[..., 1], cmap='viridis')
-            # ax.set_title(f'Current height channel)')
-
-            # # Target height channel
-            # ax = axes_vis[1, 2]; ax.clear()
-            # im5 = ax.imshow(obs[..., 2], cmap='viridis')
-            # ax.set_title(f'Target height channel)')
-
-            # # Create or update one colorbar per subplot (avoid duplicates)
-            # for idx, (ax, im) in enumerate(zip(axes_vis.flat, [im0, im1, im2, im3, im4, im5])):
-            #     if cbars[idx] is None:
-            #         cbars[idx] = fig_vis.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-            #     else:
-            #         cbars[idx].mappable = im
-            #         cbars[idx].update_normal(im)
-            # fig_vis.tight_layout()
-
-            # Log map images for visual debugging
-            # Normalize maps to [0,1] for image logging
-
-            # Unpack observation channels from last dimension
-            obs_diff = obs[..., 0]
-            obs_env  = obs[..., 1]
-            obs_tgt  = obs[..., 2]
-            # Normalize channels to [0,1] for tf.summary.image
-            diff_norm = (obs_diff + 1.0) / 2.0
-            env_norm = (obs_env + 1.0) / 2.0
-            tgt_norm = (obs_tgt + 1.0) / 2.0
-
-            tf.summary.image('maps/diff',   diff_norm[np.newaxis, ..., np.newaxis], step=step)
-            tf.summary.image('maps/env',    env_norm [np.newaxis, ..., np.newaxis], step=step)
-            tf.summary.image('maps/target', tgt_norm [np.newaxis, ..., np.newaxis], step=step)
-
-            # if plt.get_fignums():
-            #     fig_vis.canvas.draw()
-            # plt.pause(0.001)
-        if step % eval_interval == 0:
-            avg_return = compute_avg_return(eval_env, tf_agent.policy, num_eval_episodes)
-            tqdm.write(f'step={step}: avg_return={float(avg_return):.2f}')
-            eval_return_hist.append((step, float(avg_return)))
-            tf.summary.scalar('eval/avg_return', avg_return, step=step)
-            # train_checkpointer.save(global_step)
-            # tqdm.write(f'Checkpoint saved at step {step}')
+            visualize(fig_vis, axes_vis, cbars, vis_env, step, max_amp)
+            # Log map images for TensorBoard
+            diff_norm = (axes_vis.flat[0].images[0].get_array() - (-1)) / 2.0
+            tf.summary.image('maps/diff', diff_norm[np.newaxis, ..., np.newaxis], step=step)
+            obs_env = axes_vis.flat[4].images[0].get_array()
+            obs_tgt = axes_vis.flat[5].images[0].get_array()
+            tf.summary.image('maps/env', obs_env[np.newaxis, ..., np.newaxis], step=step)
+            tf.summary.image('maps/target', obs_tgt[np.newaxis, ..., np.newaxis], step=step)
+        if eval_interval > 0 and step % eval_interval == 0:
+            # Detailed evaluation metrics
+            metrics = compute_eval(eval_py_env, tf_agent.policy, num_eval_episodes)
+            # Log error-focused metrics to TensorBoard
+            tf.summary.scalar('eval/delta_rmse_mean', metrics['delta_rmse_mean'], step=step)
+            tf.summary.scalar('eval/rel_improve_mean', metrics['rel_improve_mean'], step=step)
+            tf.summary.scalar('eval/auc_rmse_mean',   metrics['auc_rmse_mean'],   step=step)
+            tf.summary.scalar('eval/slope_rmse_mean', metrics['slope_rmse_mean'], step=step)
+            # Console output for quick look
+            tqdm.write(
+                f"[Eval @ {step}] ΔRMSE: {metrics['delta_rmse_mean']:.4f}, "
+                f"RelImprove: {metrics['rel_improve_mean']:.2%}, "
+                f"FinalRMSE: {metrics['final_rmse_mean']:.4f}"
+            )
+        if step % checkpoint_interval == 0:
+            train_checkpointer.save(global_step)
+            tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
 
     # ---- save & plot logged metrics ----
     metrics_path = os.path.join(logdir, 'metrics.npz')
     np.savez(metrics_path,
              steps_loss=np.array([s for s, _ in train_loss_hist]),
-             loss=np.array([v for _, v in train_loss_hist]),
-             steps_eval=np.array([s for s, _ in eval_return_hist]),
-             avg_return=np.array([v for _, v in eval_return_hist]))
-
-    if train_loss_hist and eval_return_hist:
-        fig, ax1 = plt.subplots(figsize=(8, 5))
-        steps_loss = [s for s, _ in train_loss_hist]
-        loss_vals = [v for _, v in train_loss_hist]
-        ax1.plot(steps_loss, loss_vals, label='Train loss')
-        ax1.set_xlabel('Environment steps')
-        ax1.set_ylabel('Train loss')
-
-        ax2 = ax1.twinx()
-        steps_eval = [s for s, _ in eval_return_hist]
-        ret_vals = [v for _, v in eval_return_hist]
-        ax2.plot(steps_eval, ret_vals, linestyle='--', label='Avg return')
-        ax2.set_ylabel('Average return')
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2)
-        fig.tight_layout()
-        fig.savefig(os.path.join(logdir, 'metrics.png'))
-        plt.close(fig)
+             loss=np.array([v for _, v in train_loss_hist]))
 
     final_path = os.path.join(policy_base, 'final')
     PolicySaver(tf_agent.policy).save(final_path)
@@ -305,15 +297,14 @@ def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=6,
+    parser.add_argument('--num_envs', type=int, default=32,
                         help='Number of parallel environments for training')
-    parser.add_argument('--log_interval', type=int, default=100,
-                        help='Logging interval in environment steps')
-    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
+    parser.add_argument('--checkpoint_interval', type=int, default=10000, help='Steps between checkpoint saves')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
           num_parallel_envs=args.num_envs,
-          log_interval=args.log_interval,
+          checkpoint_interval=args.checkpoint_interval,
           seed=args.seed)
 
 if __name__ == '__main__':
