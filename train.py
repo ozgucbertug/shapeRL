@@ -281,10 +281,12 @@ def main(_argv=None):
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
     parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
+    parser.add_argument('--eval_interval', type=int, default=1000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
+          eval_interval=args.eval_interval,
           num_parallel_envs=args.num_envs,
           checkpoint_interval=args.checkpoint_interval,
           seed=args.seed,
