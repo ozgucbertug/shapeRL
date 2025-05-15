@@ -13,6 +13,7 @@ from tf_agents.environments import ParallelPyEnvironment
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
+import random
 import argparse
 from tqdm.auto import tqdm, trange
 
@@ -41,7 +42,11 @@ def compute_avg_return(environment, policy, num_episodes=10):
         total_return += episode_return
     return total_return / num_episodes
 
-def train(vis_interval=50, num_parallel_envs=8, log_interval=100):
+def train(vis_interval=50, num_parallel_envs=8, log_interval=100, seed=None):
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        tf.random.set_seed(seed)
     # Hyperparameters
     num_iterations = 200000
     collect_steps_per_iteration = 5
@@ -304,10 +309,12 @@ def main(_argv=None):
                         help='Number of parallel environments for training')
     parser.add_argument('--log_interval', type=int, default=100,
                         help='Logging interval in environment steps')
+    parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
           num_parallel_envs=args.num_envs,
-          log_interval=args.log_interval)
+          log_interval=args.log_interval,
+          seed=args.seed)
 
 if __name__ == '__main__':
     handle_main(main)

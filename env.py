@@ -6,6 +6,7 @@ from tf_agents.trajectories import time_step as ts
 from heightmap import HeightMap
 
 import matplotlib.pyplot as plt
+import random
 
 class SandShapingEnv(py_environment.PyEnvironment):
     def __init__(self,
@@ -16,12 +17,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  scale_range=(1, 2),
                  target_scale_range=(2, 4),
                  amplitude_range=(10.0, 40.0),
-                 tool_radius=20,
+                 tool_radius=10,
                  max_steps=200,
                  alpha=0.5,
                  progress_only=False,
-                 debug=False):
+                 debug=False,
+                 seed=None):
         self.debug = debug
+        self._seed = seed
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+            tf.random.set_seed(seed)
+        self._rng = np.random.default_rng(seed)
         self._width = width
         self._height = height
         self._patch_width = patch_width
@@ -97,25 +105,29 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
     def _reset(self):
         # Sample new substrate
-        scale_x = np.random.uniform(self._scale_range[0], self._scale_range[1])
-        scale_y = np.random.uniform(self._scale_range[0], self._scale_range[1])
-        amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        scale_x = self._rng.uniform(self._scale_range[0], self._scale_range[1])
+        scale_y = self._rng.uniform(self._scale_range[0], self._scale_range[1])
+        amplitude = self._rng.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        env_seed = None if self._seed is None else int(self._rng.integers(0, 2**32))
         self._env_map = HeightMap(self._width,
                                   self._height,
                                   scale=(scale_x, scale_y),
                                   amplitude=amplitude,
                                   tool_radius=self._tool_radius,
+                                  seed=env_seed,
                                   bedrock_offset=30)
 
         # Sample new target patch
-        tgt_scale_x = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
-        tgt_scale_y = np.random.uniform(self._target_scale_range[0], self._target_scale_range[1])
-        tgt_amplitude = np.random.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        tgt_scale_x = self._rng.uniform(self._target_scale_range[0], self._target_scale_range[1])
+        tgt_scale_y = self._rng.uniform(self._target_scale_range[0], self._target_scale_range[1])
+        tgt_amplitude = self._rng.uniform(self._amplitude_range[0], self._amplitude_range[1])
+        tgt_seed = None if self._seed is None else int(self._rng.integers(0, 2**32))
         self._target_map = HeightMap(self._patch_width,
                                      self._patch_height,
                                      scale=(tgt_scale_x, tgt_scale_y),
                                      amplitude=tgt_amplitude,
-                                     tool_radius=self._tool_radius)
+                                     tool_radius=self._tool_radius,
+                                     seed=tgt_seed)
 
         self._step_count = 0
         self._episode_ended = False
