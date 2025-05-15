@@ -1,12 +1,8 @@
 import numpy as np
-import tensorflow as tf
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
 from heightmap import HeightMap
-
-import matplotlib.pyplot as plt
-import random
 
 class SandShapingEnv(py_environment.PyEnvironment):
     def __init__(self,
@@ -25,10 +21,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  seed=None):
         self.debug = debug
         self._seed = seed
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
-            tf.random.set_seed(seed)
         self._rng = np.random.default_rng(seed)
         self._width = width
         self._height = height
@@ -38,6 +30,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._amp_max = self._amplitude_range[1]  # cache to avoid repeated index lookups
+        # Precompute reciprocals for observation scaling
+        self._inv_scale_d = 2.0 / self._amp_max
+        self._inv_scale_h = 1.0 / self._amp_max
         self._tool_radius = tool_radius
         self._max_steps = max_steps
         self._alpha = alpha
@@ -91,13 +86,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         -------
         obs : np.ndarray, float32, shape (H, W, 3), range [-1,1]
         """
-        # scale_d, scale_h picked once for the episode
-        scale_d = 0.5 * self._amp_max      # ½ of the maximum amplitude
-        scale_h = self._amp_max            #   maximum amplitude
-
-        diff_signed = np.clip(diff / scale_d, -1.0, 1.0)           # (-1, 1)
-        env_norm    = np.clip((h - h.mean()) / scale_h, -1.0, 1.0) # (-1, 1)
-        tgt_norm    = np.clip((t - t.mean()) / scale_h, -1.0, 1.0) # (-1, 1)
+        diff_signed = np.clip(diff * self._inv_scale_d, -1.0, 1.0)
+        env_norm    = np.clip((h - h.mean()) * self._inv_scale_h, -1.0, 1.0)
+        tgt_norm    = np.clip((t - t.mean()) * self._inv_scale_h, -1.0, 1.0)
 
         obs = np.stack([diff_signed, env_norm, tgt_norm], axis=-1).astype(np.float32)
 
@@ -160,16 +151,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Local RMSE before the press
         diff_before = self._env_map.difference(self._target_map)
         err_before = np.sqrt(np.mean(diff_before**2))
-        coords = np.indices(diff_before.shape)
-        mask_local = (coords[0] - cy)**2 + (coords[1] - cx)**2 <= self._tool_radius**2
-        loc_err_before = np.sqrt(np.mean(diff_before[mask_local]**2))
+        # Local RMSE before the press
+        r = self._tool_radius
+        y0, y1 = cy - r, cy + r + 1
+        x0, x1 = cx - r, cx + r + 1
+        sub_before = diff_before[y0:y1, x0:x1]
+        mask = self._env_map._press_mask
+        loc_err_before = np.sqrt(np.mean(sub_before[mask]**2))
 
         # Apply press and measure removed volume
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Local RMSE after the press
         diff_after = self._env_map.difference(self._target_map)
-        loc_err_after = np.sqrt(np.mean(diff_after[mask_local]**2))
+        sub_after = diff_after[y0:y1, x0:x1]
+        loc_err_after = np.sqrt(np.mean(sub_after[mask]**2))
         err_after = np.sqrt(np.mean(diff_after**2))
         delta_glob = err_before - err_after
         delta_loc = loc_err_before - loc_err_after

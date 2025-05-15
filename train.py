@@ -6,14 +6,12 @@ from tf_agents.agents.sac import sac_agent
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
 from tf_agents.policies.policy_saver import PolicySaver
-from tf_agents.metrics import tf_metrics
 from tf_agents.utils.common import function, Checkpointer
 from tf_agents.environments import ParallelPyEnvironment
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
-import random
 import argparse
 from tqdm.auto import tqdm, trange
 
@@ -65,10 +63,6 @@ def visualize(fig, axes, cbars, env, step, max_amp):
             cbars[idx].mappable = im
             cbars[idx].update_normal(im)
     fig.tight_layout()
-
-def sample_random_action(spec):
-    return np.random.uniform(low=spec.minimum,
-                             high=spec.maximum).astype(np.float32)
 
 
 def compute_eval(env, policy, num_episodes=10):
@@ -122,21 +116,15 @@ def compute_eval(env, policy, num_episodes=10):
     }
     return metrics
 
-def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint_interval=10000, seed=None):
+def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint_interval=10000, seed=None, batch_size=256, collect_steps_per_iteration=5, num_iterations=200000):
     if seed is not None:
-        random.seed(seed)
         np.random.seed(seed)
         tf.random.set_seed(seed)
     # Hyperparameters
-    num_iterations = 200000
-    collect_steps_per_iteration = 5
     replay_buffer_capacity = 16384
-    batch_size = 256
     learning_rate = 3e-4
     gamma = 0.99
     num_eval_episodes = 5
-
-    warmup_batches = int(np.ceil(batch_size / (collect_steps_per_iteration * num_parallel_envs)))
 
     # Create seeded Python environments for training, evaluation, and visualization
     env_fns = []
@@ -199,8 +187,6 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
 
-    train_loss_hist = []
-
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
         batch_size=num_parallel_envs,
@@ -213,23 +199,20 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
     ).prefetch(2)
     iterator = iter(dataset)
 
-    train_metrics = [
-        tf_metrics.NumberOfEpisodes(),
-        tf_metrics.EnvironmentSteps(),
-        tf_metrics.AverageReturnMetric(batch_size=num_parallel_envs),
-        tf_metrics.AverageEpisodeLengthMetric(batch_size=num_parallel_envs),
-    ]
-
     collect_driver = DynamicStepDriver(
         train_env,
         tf_agent.collect_policy,
-        observers=[replay_buffer.add_batch] + train_metrics,
+        observers=[replay_buffer.add_batch],
         num_steps=collect_steps_per_iteration
     )
 
+    # Warm up replay buffer so we have at least one batch of data
+    while replay_buffer.num_frames() < batch_size:
+        collect_driver.run()
+
     train_checkpointer = Checkpointer(
         ckpt_dir=checkpoint_dir,
-        max_to_keep=1,
+        max_to_keep=3,
         agent=tf_agent,
         policy=tf_agent.policy,
         replay_buffer=replay_buffer,
@@ -237,13 +220,11 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
     )
     train_checkpointer.initialize_or_restore()
 
-    for _ in range(warmup_batches):
-        collect_driver.run()
-
     if vis_interval > 0:
         fig_vis, axes_vis = plt.subplots(2, 3, figsize=(12, 9))
         cbars = [None] * 6  # one colorbar placeholder per subplot
         max_amp = vis_env._amplitude_range[1]
+        vis_ts = vis_env.reset()
 
     @function
     def train_step():
@@ -251,42 +232,42 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
         experience, _ = next(iterator)
         return tf_agent.train(experience)
 
-    for step in trange(1, num_iterations + 1, desc='Training'):
-        train_info = train_step()
-        train_loss = train_info.loss
-        vis_env.step(sample_random_action(vis_env.action_spec()))
-        if vis_interval > 0 and step % vis_interval == 0:
-            visualize(fig_vis, axes_vis, cbars, vis_env, step, max_amp)
-            # Log map images for TensorBoard
-            diff_norm = (axes_vis.flat[0].images[0].get_array() - (-1)) / 2.0
-            tf.summary.image('maps/diff', diff_norm[np.newaxis, ..., np.newaxis], step=step)
-            obs_env = axes_vis.flat[4].images[0].get_array()
-            obs_tgt = axes_vis.flat[5].images[0].get_array()
-            tf.summary.image('maps/env', obs_env[np.newaxis, ..., np.newaxis], step=step)
-            tf.summary.image('maps/target', obs_tgt[np.newaxis, ..., np.newaxis], step=step)
-        if eval_interval > 0 and step % eval_interval == 0:
-            # Detailed evaluation metrics
-            metrics = compute_eval(eval_py_env, tf_agent.policy, num_eval_episodes)
-            # Log error-focused metrics to TensorBoard
-            tf.summary.scalar('eval/delta_rmse_mean', metrics['delta_rmse_mean'], step=step)
-            tf.summary.scalar('eval/rel_improve_mean', metrics['rel_improve_mean'], step=step)
-            tf.summary.scalar('eval/auc_rmse_mean',   metrics['auc_rmse_mean'],   step=step)
-            tf.summary.scalar('eval/slope_rmse_mean', metrics['slope_rmse_mean'], step=step)
-            # Console output for quick look
-            tqdm.write(
-                f"[Eval @ {step}] ΔRMSE: {metrics['delta_rmse_mean']:.4f}, "
-                f"RelImprove: {metrics['rel_improve_mean']:.2%}, "
-                f"FinalRMSE: {metrics['final_rmse_mean']:.4f}"
-            )
-        if step % checkpoint_interval == 0:
-            train_checkpointer.save(global_step)
-            tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
-
-    # ---- save & plot logged metrics ----
-    metrics_path = os.path.join(logdir, 'metrics.npz')
-    np.savez(metrics_path,
-             steps_loss=np.array([s for s, _ in train_loss_hist]),
-             loss=np.array([v for _, v in train_loss_hist]))
+    try:
+        for step in trange(1, num_iterations + 1, desc='Training'):
+            train_info = train_step()
+            train_loss = train_info.loss
+            if vis_interval > 0 and step % vis_interval == 0:
+                if vis_ts.is_last():
+                    vis_ts = vis_env.reset()
+                action_vis = tf_agent.policy.action(vis_ts).action
+                if hasattr(action_vis, "numpy"): action_vis = action_vis.numpy()
+                vis_ts = vis_env.step(action_vis)
+                visualize(fig_vis, axes_vis, cbars, vis_env, step, max_amp)
+                # Log map images for TensorBoard
+                diff_norm = (axes_vis.flat[0].images[0].get_array() - (-1)) / 2.0
+                tf.summary.image('maps/diff', diff_norm[np.newaxis, ..., np.newaxis], step=step)
+                obs_env = axes_vis.flat[4].images[0].get_array()
+                obs_tgt = axes_vis.flat[5].images[0].get_array()
+                tf.summary.image('maps/env', obs_env[np.newaxis, ..., np.newaxis], step=step)
+                tf.summary.image('maps/target', obs_tgt[np.newaxis, ..., np.newaxis], step=step)
+            if eval_interval > 0 and step % eval_interval == 0:
+                # Detailed evaluation metrics
+                metrics = compute_eval(eval_py_env, tf_agent.policy, num_eval_episodes)
+                # Log error-focused metrics to TensorBoard
+                tf.summary.scalar('eval/delta_rmse_mean', metrics['delta_rmse_mean'], step=step)
+                tf.summary.scalar('eval/rel_improve_mean', metrics['rel_improve_mean'], step=step)
+                tf.summary.scalar('eval/auc_rmse_mean',   metrics['auc_rmse_mean'],   step=step)
+                tf.summary.scalar('eval/slope_rmse_mean', metrics['slope_rmse_mean'], step=step)
+                # Console output for quick look
+                tqdm.write(
+                    f"[Eval @ {step}] ΔRMSE: {metrics['delta_rmse_mean']:.4f}, "
+                    f"RelImprove: {metrics['rel_improve_mean']:.2%}, "
+                )
+            if step % checkpoint_interval == 0:
+                train_checkpointer.save(global_step)
+                tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
+    except KeyboardInterrupt:
+        print("Training interrupted at step", step)
 
     final_path = os.path.join(policy_base, 'final')
     PolicySaver(tf_agent.policy).save(final_path)
@@ -297,15 +278,21 @@ def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--vis_interval', type=int, default=100,
                         help='Visualization interval')
-    parser.add_argument('--num_envs', type=int, default=32,
+    parser.add_argument('--num_envs', type=int, default=6,
                         help='Number of parallel environments for training')
     parser.add_argument('--checkpoint_interval', type=int, default=10000, help='Steps between checkpoint saves')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for training')
+    parser.add_argument('--collect_steps', type=int, default=5, help='Number of steps to collect per iteration')
+    parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
     args = parser.parse_args()
     train(vis_interval=args.vis_interval,
           num_parallel_envs=args.num_envs,
           checkpoint_interval=args.checkpoint_interval,
-          seed=args.seed)
+          seed=args.seed,
+          batch_size=args.batch_size,
+          collect_steps_per_iteration=args.collect_steps,
+          num_iterations=args.num_iterations)
 
 if __name__ == '__main__':
     handle_main(main)
