@@ -16,6 +16,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
                  tool_radius=10,
                  max_steps=200,
                  alpha=0.5,
+                 error_threshold=0.05,
+                 success_bonus=1.0,
+                 fail_penalty=-1.0,
+                 terminate_on_success=True,
+                 fail_on_breach=True,
                  progress_only=False,
                  debug=False,
                  seed=None):
@@ -36,6 +41,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tool_radius = tool_radius
         self._max_steps = max_steps
         self._alpha = alpha
+
+        # Success / failure logic
+        self._error_threshold      = error_threshold
+        self._success_bonus        = success_bonus
+        self._fail_penalty         = fail_penalty
+        self._terminate_on_success = terminate_on_success
+        self._fail_on_breach       = fail_on_breach
 
         # Action spec: [x, y, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
@@ -71,6 +83,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # Utility: build 3‑channel observation and (optionally) visualise it #
     # ------------------------------------------------------------------ #
     def _build_observation(self, diff, h, t):
+    # ---------------------------------------------------- #
+    #  Reward computation – easy to swap for new schemes   #
+    # ---------------------------------------------------- #
+    def _compute_reward(self,
+                        err_before, err_after,
+                        loc_err_before, loc_err_after):
+        """Return scalar reward for a press action."""
+        delta_glob = err_before - err_after
+        delta_loc  = loc_err_before - loc_err_after
+        return self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
+
         """Return the 3‑channel observation tensor.
 
         Parameters
@@ -167,10 +190,27 @@ class SandShapingEnv(py_environment.PyEnvironment):
         sub_after = diff_after[y0:y1, x0:x1]
         loc_err_after = np.sqrt(np.mean(sub_after[mask]**2))
         err_after = np.sqrt(np.mean(diff_after**2))
-        delta_glob = err_before - err_after
-        delta_loc = loc_err_before - loc_err_after
-        
-        reward = self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
+        reward = self._compute_reward(err_before, err_after,
+                                      loc_err_before, loc_err_after)
+
+        # ----- early‑termination checks -----
+        # 1) success if global RMSE is sufficiently low
+        if self._terminate_on_success and err_after <= self._error_threshold:
+            self._episode_ended = True
+            reward += self._success_bonus
+            h = self._env_map.map
+            t = self._target_map.map
+            obs = self._build_observation(diff_after, h, t)
+            return ts.termination(obs, reward)
+
+        # 2) failure if any voxel would carve below bedrock
+        if self._fail_on_breach and np.any((diff_after + self._env_map.map) < 0.0):
+            self._episode_ended = True
+            reward += self._fail_penalty
+            h = self._env_map.map
+            t = self._target_map.map
+            obs = self._build_observation(diff_after, h, t)
+            return ts.termination(obs, reward)
 
         self._step_count += 1
 
