@@ -20,6 +20,10 @@ import os
 from matplotlib import colors
 from datetime import datetime
 
+# --- Heuristic policy imports ---
+from tf_agents.policies import py_policy
+from tf_agents.trajectories import policy_step
+
 # --- Visualization function ---
 def visualize(fig, axes, cbars, env, step, max_amp):
     """
@@ -63,6 +67,57 @@ def visualize(fig, axes, cbars, env, step, max_amp):
             cbars[idx].mappable = im
             cbars[idx].update_normal(im)
     fig.tight_layout()
+
+
+# ---------- Heuristic Policy --------------------------------------------------
+class HeuristicPressPolicy(py_policy.PyPolicy):
+    """
+    Greedy one‑step policy: press at the (x,y) with maximum positive
+    env‑minus‑target height difference.  Uses only the diff channel that is
+    already present in the observation, so it works with ParallelPyEnvironment.
+    """
+    def __init__(self, time_step_spec, action_spec,
+                 width, height, tool_radius, amp_max):
+        super().__init__(time_step_spec, action_spec)
+        self._w = width
+        self._h = height
+        self._r = tool_radius
+        self._amp_max = amp_max        # same as env._amplitude_range[1]
+        self._inv_depth = 1.0 / (0.66 * tool_radius)   # for dz normalisation
+
+    # ----- utility -----------------------------------------------------------
+    def _single_action(self, diff_signed):
+        """
+        diff_signed: (H,W) array, range [-1,1]  (already clipped)
+        """
+        cy, cx = np.unravel_index(np.argmax(diff_signed), diff_signed.shape)
+
+        # (x,y) → normalised action coords
+        x_norm = (cx - self._r) / max(1e-6, (self._w - 2 * self._r))
+        y_norm = (cy - self._r) / max(1e-6, (self._h - 2 * self._r))
+        x_norm = float(np.clip(x_norm, 0.0, 1.0))
+        y_norm = float(np.clip(y_norm, 0.0, 1.0))
+
+        # Estimate absolute diff height from signed channel
+        # diff_signed = diff * (2/amp_max)  ⇒  diff ≈ diff_signed * amp_max/2
+        diff_abs = diff_signed[cy, cx] * (self._amp_max * 0.5)
+        depth = max(0.0, diff_abs * 1.1)        # 10 % overshoot
+        depth = min(depth, 0.66 * self._r)      # respect env max depth
+        dz_norm = depth * self._inv_depth       # scale to [0,1]
+        dz_norm = float(np.clip(dz_norm, 0.0, 1.0))
+
+        return np.array([x_norm, y_norm, dz_norm], dtype=np.float32)
+
+    # ----- PyPolicy overrides -------------------------------------------------
+    def _action(self, time_step, policy_state):
+        obs = time_step.observation           # (B,H,W,3) or (H,W,3)
+        if obs.ndim == 4:                     # batched
+            batch_actions = [self._single_action(obs[i, ..., 0])
+                             for i in range(obs.shape[0])]
+            act = np.stack(batch_actions, axis=0)
+        else:
+            act = self._single_action(obs[..., 0])
+        return policy_step.PolicyStep(act, policy_state, ())
 
 
 def compute_eval(env, policy, num_episodes=10):
@@ -116,7 +171,17 @@ def compute_eval(env, policy, num_episodes=10):
     }
     return metrics
 
-def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint_interval=10000, seed=None, batch_size=256, collect_steps_per_iteration=5, num_iterations=200000):
+def train(
+    num_parallel_envs=8,
+    vis_interval=1000,
+    eval_interval=1000,
+    checkpoint_interval=10000,
+    seed=None,
+    batch_size=256,
+    collect_steps_per_iteration=5,
+    num_iterations=200000,
+    use_heuristic_warmup: bool = False
+):
     if seed is not None:
         np.random.seed(seed)
         tf.random.set_seed(seed)
@@ -206,9 +271,30 @@ def train(num_parallel_envs=8, vis_interval=1000, eval_interval=1000, checkpoint
         num_steps=collect_steps_per_iteration
     )
 
-    # Warm up replay buffer so we have at least one batch of data
-    while replay_buffer.num_frames() < batch_size:
-        collect_driver.run()
+    # Warm-up buffer: heuristic or random
+    if use_heuristic_warmup:
+        HEURISTIC_WARMUP_FRAMES = max(batch_size * 10, 5000)  # quick warm-up
+        ref_env = train_py_env.envs[0]
+        heuristic_policy = HeuristicPressPolicy(
+            time_step_spec=train_py_env.time_step_spec(),
+            action_spec=action_spec,
+            width=ref_env._width,
+            height=ref_env._height,
+            tool_radius=ref_env._tool_radius,
+            amp_max=ref_env._amplitude_range[1],
+        )
+        heuristic_driver = DynamicStepDriver(
+            train_py_env,
+            heuristic_policy,
+            observers=[replay_buffer.add_batch],
+            num_steps=collect_steps_per_iteration,
+        )
+        while replay_buffer.num_frames() < HEURISTIC_WARMUP_FRAMES:
+            heuristic_driver.run()
+    else:
+        # Random warm-up to at least one batch
+        while replay_buffer.num_frames() < batch_size:
+            collect_driver.run()
 
     train_checkpointer = Checkpointer(
         ckpt_dir=checkpoint_dir,
@@ -284,7 +370,10 @@ def main(_argv=None):
     parser.add_argument('--eval_interval', type=int, default=0, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
+
     args = parser.parse_args()
+    
     train(vis_interval=args.vis_interval,
           eval_interval=args.eval_interval,
           num_parallel_envs=args.num_envs,
@@ -292,7 +381,8 @@ def main(_argv=None):
           seed=args.seed,
           batch_size=args.batch_size,
           collect_steps_per_iteration=args.collect_steps,
-          num_iterations=args.num_iterations)
+          num_iterations=args.num_iterations,
+          use_heuristic_warmup=args.heuristic_warmup)
 
 if __name__ == '__main__':
     handle_main(main)

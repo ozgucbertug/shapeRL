@@ -239,6 +239,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         h = self._env_map.map
         t = self._target_map.map
         obs = self._build_observation(diff_after, h, t)
+        
         if self._step_count >= self._max_steps:
             self._episode_ended = True
             return ts.termination(obs, reward)
