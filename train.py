@@ -5,9 +5,13 @@ from tf_agents.agents.ddpg.critic_network import CriticNetwork
 from tf_agents.agents.sac import sac_agent
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
+from tf_agents.drivers.py_driver import PyDriver
 from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.utils.common import function, Checkpointer
 from tf_agents.environments import ParallelPyEnvironment
+
+# Additional keras imports for encoder architectures
+from tensorflow.keras import layers, models
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
@@ -67,6 +71,39 @@ def visualize(fig, axes, cbars, env, step, max_amp):
             cbars[idx].mappable = im
             cbars[idx].update_normal(im)
     fig.tight_layout()
+
+
+# ---------- UNet Encoder ----------------------------------------------------
+def build_unet_encoder(input_shape, latent_dim=256):
+    """
+    Returns a keras.Model that maps an (H,W,C) observation to a latent vector
+    of length `latent_dim`.  A lightweight 2‑down 2‑up UNet.
+    """
+    inputs = layers.Input(shape=input_shape)
+    # Down 1
+    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
+    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(c1)
+    p1 = layers.MaxPool2D()(c1)
+    # Down 2
+    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(p1)
+    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(c2)
+    p2 = layers.MaxPool2D()(c2)
+    # Bottleneck
+    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(p2)
+    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(b)
+    # Up 1
+    u1 = layers.UpSampling2D()(b)
+    u1 = layers.Concatenate()([u1, c2])
+    c3 = layers.Conv2D(64, 3, padding='same', activation='relu')(u1)
+    c3 = layers.Conv2D(64, 3, padding='same', activation='relu')(c3)
+    # Up 2
+    u2 = layers.UpSampling2D()(c3)
+    u2 = layers.Concatenate()([u2, c1])
+    c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(u2)
+    c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(c4)
+    flat = layers.Flatten()(c4)
+    latent = layers.Dense(latent_dim, activation='relu')(flat)
+    return models.Model(inputs, latent, name='unet_encoder')
 
 
 # ---------- Heuristic Policy --------------------------------------------------
@@ -180,7 +217,8 @@ def train(
     batch_size=256,
     collect_steps_per_iteration=5,
     num_iterations=200000,
-    use_heuristic_warmup: bool = False
+    use_heuristic_warmup: bool = False,
+    encoder_type: str = 'cnn'
 ):
     if seed is not None:
         np.random.seed(seed)
@@ -203,22 +241,36 @@ def train(
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
     # Network architecture
-    conv_layer_params = ((32, 3, 2), (64, 3, 2))
-    fc_layer_params = (256, 128)
-
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
+    # Choose encoder architecture
+    if encoder_type == 'cnn':
+        actor_conv_params = ((32, 3, 2), (64, 3, 2))
+        critic_conv_params = actor_conv_params
+        actor_preproc = None
+        critic_preproc = None
+    elif encoder_type == 'unet':
+        actor_conv_params = None
+        critic_conv_params = None
+        # Build separate UNet encoders for actor and critic to avoid layer-copy warnings
+        actor_preproc = build_unet_encoder(observation_spec.shape)
+        critic_preproc = build_unet_encoder(observation_spec.shape)
+    else:
+        raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
+
     actor_net = actor_distribution_network.ActorDistributionNetwork(
-        input_tensor_spec=observation_spec, 
+        input_tensor_spec=observation_spec,
         output_tensor_spec=action_spec,
-        conv_layer_params=conv_layer_params,
-        fc_layer_params=fc_layer_params
+        preprocessing_layers=actor_preproc,
+        conv_layer_params=actor_conv_params,
+        fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
     )
     critic_net = CriticNetwork(
         input_tensor_spec=(observation_spec, action_spec),
-        observation_conv_layer_params=conv_layer_params,
+        observation_conv_layer_params=critic_conv_params,
+        observation_fc_layer_params=None,
         action_fc_layer_params=None,
-        joint_fc_layer_params=fc_layer_params,
+        joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
         name='critic_network'
     )
 
@@ -273,24 +325,28 @@ def train(
 
     # Warm-up buffer: heuristic or random
     if use_heuristic_warmup:
-        HEURISTIC_WARMUP_FRAMES = max(batch_size * 10, 5000)  # quick warm-up
-        ref_env = train_py_env.envs[0]
+        # Python-driver heuristic warm-up on the parallel Python env
+        HEURISTIC_WARMUP_FRAMES = max(batch_size * 10, 5000)
+        # Initialize warm-up timestep:
+        warmup_ts = train_py_env.reset()
+        # Use a single eval env for shape parameters
+        warmup_env = eval_py_env
         heuristic_policy = HeuristicPressPolicy(
             time_step_spec=train_py_env.time_step_spec(),
             action_spec=action_spec,
-            width=ref_env._width,
-            height=ref_env._height,
-            tool_radius=ref_env._tool_radius,
-            amp_max=ref_env._amplitude_range[1],
+            width=warmup_env._width,
+            height=warmup_env._height,
+            tool_radius=warmup_env._tool_radius,
+            amp_max=warmup_env._amplitude_range[1],
         )
-        heuristic_driver = DynamicStepDriver(
+        heuristic_driver = PyDriver(
             train_py_env,
             heuristic_policy,
             observers=[replay_buffer.add_batch],
-            num_steps=collect_steps_per_iteration,
+            max_steps=collect_steps_per_iteration
         )
         while replay_buffer.num_frames() < HEURISTIC_WARMUP_FRAMES:
-            heuristic_driver.run()
+            warmup_ts, _ = heuristic_driver.run(warmup_ts)
     else:
         # Random warm-up to at least one batch
         while replay_buffer.num_frames() < batch_size:
@@ -371,6 +427,7 @@ def main(_argv=None):
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
+    parser.add_argument('--encoder', type=str, default='unet', choices=['cnn', 'unet'], help='Backbone encoder to use for actor/critic')
 
     args = parser.parse_args()
     
@@ -382,7 +439,8 @@ def main(_argv=None):
           batch_size=args.batch_size,
           collect_steps_per_iteration=args.collect_steps,
           num_iterations=args.num_iterations,
-          use_heuristic_warmup=args.heuristic_warmup)
+          use_heuristic_warmup=args.heuristic_warmup,
+          encoder_type=args.encoder)
 
 if __name__ == '__main__':
     handle_main(main)
