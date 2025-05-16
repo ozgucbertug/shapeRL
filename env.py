@@ -30,7 +30,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # ── MISC / DEBUG ──────────────────────────────────────────
         debug: bool = False,
         seed: int | None = None,
-        reward_beta: float = 0.01,
     ):
         self.debug = debug
         self._seed = seed
@@ -64,11 +63,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._volume_penalty_coeff = volume_penalty_coeff
         self._no_touch_penalty     = no_touch_penalty
         self._eps                  = 1e-6
-
-        # Online reward normalization stats
-        self._reward_mu   = 0.0
-        self._reward_var  = 1.0
-        self._reward_beta = reward_beta
 
         # ── SPECS ────────────────────────────────────────────────
         # Action spec: [x, y, dz_rel]  all normalised to [0,1]
@@ -107,16 +101,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ---------------------------------------------------- #
     def _compute_reward(self, err_before, err_after):
         """Return scalar reward for a press action."""
-        # Global relative improvement, normalised by episode‑initial error
+        # Global relative improvement, normalised by episode‑initial error and squashed to [-1, 1]
         rel_glob = (err_before - err_after) / self._err0
-        r = rel_glob
-        # Online reward normalization update
-        mu = self._reward_mu
-        mu_new = (1 - self._reward_beta) * mu + self._reward_beta * r
-        var_new = (1 - self._reward_beta) * self._reward_var + self._reward_beta * (r - mu) * (r - mu_new)
-        self._reward_mu, self._reward_var = mu_new, var_new
-
-        return r
+        return float(np.tanh(rel_glob))
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
