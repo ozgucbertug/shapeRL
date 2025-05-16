@@ -79,10 +79,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
     def observation_spec(self):
         return self._observation_spec
 
-    # ------------------------------------------------------------------ #
-    # Utility: build 3‑channel observation and (optionally) visualise it #
-    # ------------------------------------------------------------------ #
-    def _build_observation(self, diff, h, t):
+
     # ---------------------------------------------------- #
     #  Reward computation – easy to swap for new schemes   #
     # ---------------------------------------------------- #
@@ -93,7 +90,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         delta_glob = err_before - err_after
         delta_loc  = loc_err_before - loc_err_after
         return self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
-
+    
+    # ------------------------------------------------------------------ #
+    # Utility: build 3‑channel observation and (optionally) visualise it #
+    # ------------------------------------------------------------------ #
+    def _build_observation(self, diff, h, t):
         """Return the 3‑channel observation tensor.
 
         Parameters
