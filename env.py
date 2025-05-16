@@ -5,28 +5,38 @@ from tf_agents.trajectories import time_step as ts
 from heightmap import HeightMap
 
 class SandShapingEnv(py_environment.PyEnvironment):
-    def __init__(self,
-                 width=128,
-                 height=128,
-                 patch_width=128,
-                 patch_height=128,
-                 scale_range=(1, 2),
-                 target_scale_range=(2, 4),
-                 amplitude_range=(10.0, 40.0),
-                 tool_radius=10,
-                 max_steps=200,
-                 alpha=0.5,
-                 error_threshold=0.05,
-                 success_bonus=1.0,
-                 fail_penalty=-1.0,
-                 terminate_on_success=True,
-                 fail_on_breach=True,
-                 progress_only=False,
-                 debug=False,
-                 seed=None):
+    def __init__(
+        self,
+        # ── GEOMETRY & PROCEDURAL MAP ──────────────────────────────
+        width: int = 128,
+        height: int = 128,
+        patch_width: int = 128,
+        patch_height: int = 128,
+        scale_range=(1, 2),
+        target_scale_range=(2, 4),
+        amplitude_range=(10.0, 40.0),
+        # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
+        tool_radius: int = 10,
+        max_steps: int = 200,
+        # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
+        error_threshold: float = 0.05,
+        success_bonus: float = 1.0,
+        fail_penalty: float = -1.0,
+        terminate_on_success: bool = True,
+        fail_on_breach: bool = True,
+        # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
+        volume_penalty_coeff: float = 3e-4,
+        no_touch_penalty: float = 0.05,
+        # ── MISC / DEBUG ──────────────────────────────────────────
+        debug: bool = False,
+        seed: int | None = None,
+        reward_beta: float = 0.01,
+    ):
         self.debug = debug
         self._seed = seed
         self._rng = np.random.default_rng(seed)
+
+        # ── GEOMETRY & PROCEDURAL MAP ──────────────────────────────
         self._width = width
         self._height = height
         self._patch_width = patch_width
@@ -38,17 +48,29 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Precompute reciprocals for observation scaling
         self._inv_scale_d = 2.0 / self._amp_max
         self._inv_scale_h = 1.0 / self._amp_max
+
+        # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
         self._max_steps = max_steps
-        self._alpha = alpha
 
-        # Success / failure logic
+        # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         self._error_threshold      = error_threshold
         self._success_bonus        = success_bonus
         self._fail_penalty         = fail_penalty
         self._terminate_on_success = terminate_on_success
         self._fail_on_breach       = fail_on_breach
 
+        # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
+        self._volume_penalty_coeff = volume_penalty_coeff
+        self._no_touch_penalty     = no_touch_penalty
+        self._eps                  = 1e-6
+
+        # Online reward normalization stats
+        self._reward_mu   = 0.0
+        self._reward_var  = 1.0
+        self._reward_beta = reward_beta
+
+        # ── SPECS ────────────────────────────────────────────────
         # Action spec: [x, y, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
             shape=(3,),
@@ -66,8 +88,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
             name='observation'
         )
 
+        # ── STATE VARIABLES ──────────────────────────────────────
         self._episode_ended = False
-
         self._env_map = None
         self._target_map = None
 
@@ -83,13 +105,18 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ---------------------------------------------------- #
     #  Reward computation – easy to swap for new schemes   #
     # ---------------------------------------------------- #
-    def _compute_reward(self,
-                        err_before, err_after,
-                        loc_err_before, loc_err_after):
+    def _compute_reward(self, err_before, err_after):
         """Return scalar reward for a press action."""
-        delta_glob = err_before - err_after
-        delta_loc  = loc_err_before - loc_err_after
-        return self._alpha * delta_glob + (1.0 - self._alpha) * delta_loc
+        # Global relative improvement, normalised by episode‑initial error
+        rel_glob = (err_before - err_after) / self._err0
+        r = rel_glob
+        # Online reward normalization update
+        mu = self._reward_mu
+        mu_new = (1 - self._reward_beta) * mu + self._reward_beta * r
+        var_new = (1 - self._reward_beta) * self._reward_var + self._reward_beta * (r - mu) * (r - mu_new)
+        self._reward_mu, self._reward_var = mu_new, var_new
+
+        return r
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
@@ -118,6 +145,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         return obs
 
+    # ------------------------------------------------------------------ #
+    # Episode initialisation: sample new terrain & target, reset metrics #
+    # ------------------------------------------------------------------ #
     def _reset(self):
         # Sample new substrate
         scale_x = self._rng.uniform(self._scale_range[0], self._scale_range[1])
@@ -153,8 +183,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
         h = self._env_map.map
         t = self._target_map.map
         obs = self._build_observation(diff, h, t)
+
+        # Cache initial global RMSE for per‑episode normalisation
+        self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
+
         return ts.restart(obs)
 
+
+    # ------------------------------------------------------------------ #
+    # One environment step: execute press, update reward & termination   #
+    # ------------------------------------------------------------------ #
     def _step(self, action):
         if self._episode_ended:
             return self._reset()
@@ -162,6 +200,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Parse action
         x_norm, y_norm, dz_norm = action
 
+        # Map normalised action to world coordinates / absolute tool tip
         x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
         y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
 
@@ -175,24 +214,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Local RMSE before the press
         diff_before = self._env_map.difference(self._target_map)
         err_before = np.sqrt(np.mean(diff_before**2))
-        # Local RMSE before the press
-        r = self._tool_radius
-        y0, y1 = cy - r, cy + r + 1
-        x0, x1 = cx - r, cx + r + 1
-        sub_before = diff_before[y0:y1, x0:x1]
-        mask = self._env_map._press_mask
-        loc_err_before = np.sqrt(np.mean(sub_before[mask]**2))
 
         # Apply press and measure removed volume
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Local RMSE after the press
         diff_after = self._env_map.difference(self._target_map)
-        sub_after = diff_after[y0:y1, x0:x1]
-        loc_err_after = np.sqrt(np.mean(sub_after[mask]**2))
         err_after = np.sqrt(np.mean(diff_after**2))
-        reward = self._compute_reward(err_before, err_after,
-                                      loc_err_before, loc_err_after)
+        reward = self._compute_reward(err_before, err_after)
+
+        # Penalise ineffective or wasteful actions
+        if not touched:
+            reward -= self._no_touch_penalty
+        reward -= self._volume_penalty_coeff * removed
 
         # ----- early‑termination checks -----
         # 1) success if global RMSE is sufficiently low
