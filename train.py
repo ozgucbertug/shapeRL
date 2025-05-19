@@ -49,18 +49,31 @@ class CoordConv(layers.Layer):
 class FPNBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
         super().__init__(**kwargs)
+        self.filters = filters
+        self.shortcut = None
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
         self.bn1 = layers.BatchNormalization()
         self.conv2 = layers.Conv2D(filters, 3, padding='same')
         self.bn2 = layers.BatchNormalization()
         self.relu = layers.Activation('relu')
+
+    def build(self, input_shape):
+        input_channels = input_shape[-1]
+        if input_channels != self.filters:
+            self.shortcut = layers.Conv2D(self.filters, 1, padding='same')
+        super().build(input_shape)
+
     def call(self, x):
         y = self.conv1(x)
         y = self.bn1(y)
         y = self.relu(y)
         y = self.conv2(y)
         y = self.bn2(y)
-        return self.relu(x + y)
+        if self.shortcut is not None:
+            x_proj = self.shortcut(x)
+        else:
+            x_proj = x
+        return self.relu(x_proj + y)
 
 class FPNEncoder(layers.Layer):
     def __init__(self, filters_list=(32, 64, 128), latent_dim=128, **kwargs):
@@ -71,7 +84,8 @@ class FPNEncoder(layers.Layer):
             self.downs.append(FPNBlock(f))
         self.pools = [layers.MaxPool2D() for _ in filters_list]
         # FPN lateral and upsample layers
-        self.lateral_convs = [layers.Conv2D(f, 1, padding='same') for f in filters_list]
+        fpn_channels = filters_list[-1]
+        self.lateral_convs = [layers.Conv2D(fpn_channels, 1, padding='same') for _ in filters_list]
         self.upsamples     = [layers.UpSampling2D(size=2) for _ in filters_list[:-1]]
         self.merge_upsamples = [layers.UpSampling2D(size=2**i) for i in range(len(filters_list))]
         self.global_pool = layers.GlobalAveragePooling2D()
@@ -135,8 +149,8 @@ class CarveActorNetwork(network.Network):
         logstd = tf.clip_by_value(logstd, -20.0, 2.0)
         # Softplus for stable, positive scale
         std = tf.nn.softplus(logstd) + 1e-6
-        # Build a Normal distribution for SAC (no sampling here)
-        dist = tfp.distributions.Normal(loc=mean, scale=std)
+        # Build a multivariate Normal distribution for SAC
+        dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
         return dist, network_state
 
 class CarveCriticNetwork(network.Network):
