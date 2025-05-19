@@ -34,17 +34,28 @@ class CoordConv(layers.Layer):
     def __init__(self, filters=32, kernel_size=1, **kwargs):
         super().__init__(**kwargs)
         self.conv = layers.Conv2D(filters, kernel_size, padding='same', activation='relu')
-    def call(self, x):
-        batch, h, w, _ = tf.unstack(tf.shape(x))
+        self.coords = None
+
+    def build(self, input_shape):
+        # Precompute coordinate grid [1, H, W, 2]
+        batch_dim, h, w, _ = input_shape
         xx = tf.linspace(-1.0, 1.0, w)
         yy = tf.linspace(-1.0, 1.0, h)
-        xx = tf.tile(xx[tf.newaxis, tf.newaxis, :], [batch, h, 1])
-        yy = tf.tile(yy[tf.newaxis, :, tf.newaxis], [batch, 1, w])
-        xx = tf.expand_dims(xx, -1)
-        yy = tf.expand_dims(yy, -1)
-        coords = tf.concat([xx, yy], axis=-1)
-        x = tf.concat([x, coords], axis=-1)
-        return self.conv(x)
+        xx = tf.reshape(xx, [1, 1, w])
+        xx = tf.tile(xx, [1, h, 1])
+        yy = tf.reshape(yy, [1, h, 1])
+        yy = tf.tile(yy, [1, 1, w])
+        self.coords = tf.stack([xx, yy], axis=-1)  # shape [1,h,w,2]
+        super().build(input_shape)
+
+    def call(self, x):
+        # Assume batched input [B, H, W, C]
+        batch = tf.shape(x)[0]
+        # Expand precomputed coords to batch size
+        coords = tf.tile(self.coords, [batch, 1, 1, 1])
+        conv_input = tf.concat([x, coords], axis=-1)
+        out = self.conv(conv_input)
+        return out
 
 class FPNBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
@@ -145,12 +156,19 @@ class CarveActorNetwork(network.Network):
         x = self.fc2(x)
         mean = self.mean(x)
         logstd = self.logstd(x)
-        # Prevent extreme log-std values
-        logstd = tf.clip_by_value(logstd, -20.0, 2.0)
-        # Softplus for stable, positive scale
-        std = tf.nn.softplus(logstd) + 1e-6
-        # Build a multivariate Normal distribution for SAC
-        dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
+        # Prevent extreme log-std values and enforce minimum scale
+        logstd = tf.clip_by_value(logstd, -5.0, 2.0)
+        std = tf.nn.softplus(logstd) + 1e-3
+
+        # Base Gaussian distribution
+        base_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
+        # Squash with tanh to [-1,1], then scale to [–0.5,0.5] and shift to [0,1]
+        bijector = tfp.bijectors.Chain([
+            tfp.bijectors.Shift(shift=0.5),
+            tfp.bijectors.Scale(scale=0.5),
+            tfp.bijectors.Tanh()
+        ])
+        dist = tfp.distributions.TransformedDistribution(distribution=base_dist, bijector=bijector)
         return dist, network_state
 
 class CarveCriticNetwork(network.Network):
