@@ -445,15 +445,15 @@ def train(
 def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
+    parser.add_argument('--num_envs', type=int, default=32, help='Number of parallel environments for training')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
     parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=0, help='Steps between evaluation')
+    parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--encoder', type=str, default='unet', choices=['cnn', 'unet'], help='Backbone encoder to use for actor/critic')
 
     args = parser.parse_args()
     
