@@ -49,18 +49,11 @@ class CoordConv(layers.Layer):
         super().build(input_shape)
 
     def call(self, x):
-        # Handle unbatched input by adding batch dimension
-        squeeze_out = False
-        if x.shape.ndims == 3:
-            x = tf.expand_dims(x, axis=0)
-            squeeze_out = True
+        # x is expected to be [B, H, W, C]
         batch_size = tf.shape(x)[0]
         coords = tf.tile(self.coords, [batch_size, 1, 1, 1])
         conv_input = tf.concat([x, coords], axis=-1)
-        out = self.conv(conv_input)
-        if squeeze_out:
-            out = tf.squeeze(out, axis=0)
-        return out
+        return self.conv(conv_input)
 
 class FPNBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
@@ -80,11 +73,6 @@ class FPNBlock(layers.Layer):
         super().build(input_shape)
 
     def call(self, x):
-        # Handle unbatched input [H,W,C]
-        squeeze_out = False
-        if x.shape.ndims == 3:
-            x = tf.expand_dims(x, axis=0)
-            squeeze_out = True
         y = self.conv1(x)
         y = self.bn1(y)
         y = self.relu(y)
@@ -95,8 +83,6 @@ class FPNBlock(layers.Layer):
         else:
             x_proj = x
         out = self.relu(x_proj + y)
-        if squeeze_out:
-            out = tf.squeeze(out, axis=0)
         return out
 
 class FPNEncoder(layers.Layer):
@@ -115,11 +101,6 @@ class FPNEncoder(layers.Layer):
         self.global_pool = layers.GlobalAveragePooling2D()
         self.latent = layers.Dense(latent_dim, activation='relu')
     def call(self, x):
-        # Handle unbatched input [H, W, C]
-        squeeze_out = False
-        if x.shape.ndims == 3:
-            x = tf.expand_dims(x, axis=0)
-            squeeze_out = True
         # Bottom-up pass
         x = self.coordconv(x)
         c_feats = []
@@ -136,10 +117,7 @@ class FPNEncoder(layers.Layer):
         # Merge multi-scale features
         merged = tf.concat([self.merge_upsamples[i](p_levels[i]) for i in range(len(p_levels))], axis=-1)
         x = self.global_pool(merged)
-        x = self.latent(x)
-        if squeeze_out:
-            x = tf.squeeze(x, axis=0)
-        return x
+        return self.latent(x)
     
 class SpatialSoftmax(layers.Layer):
     def __init__(self, **kwargs):
@@ -171,11 +149,6 @@ class CarveActorNetwork(network.Network):
         self.mean = layers.Dense(action_spec.shape[0])
         self.logstd = layers.Dense(action_spec.shape[0])
     def call(self, observations, step_type=None, network_state=(), training=False):
-        # Handle unbatched input [H, W, C]
-        squeeze_out = False
-        if observations.shape.ndims == 3:
-            observations = tf.expand_dims(observations, axis=0)
-            squeeze_out = True
         x = tf.cast(observations, tf.float32)
         x = self.encoder(x)
         x = self.fc1(x)
@@ -365,12 +338,14 @@ def compute_eval(env, policy, num_episodes=10):
       - init_rmse_mean, final_rmse_mean, delta_rmse_mean, rel_improve_mean, auc_rmse_mean, slope_rmse_mean
       - and per-episode lists for each metric.
     """
+    # Wrap raw env for policy calls
+    tf_env = tf_py_environment.TFPyEnvironment(env)
     delta_rmses = []
     rel_improves = []
     auc_rmses = []
     slopes = []
     for _ in range(num_episodes):
-        time_step = env.reset()
+        time_step = tf_env.reset()
         # initial RMSE before any actions
         diff0 = env._env_map.difference(env._target_map)
         rmse0 = np.sqrt(np.mean(diff0**2))
@@ -378,13 +353,9 @@ def compute_eval(env, policy, num_episodes=10):
         rmse_series = [rmse0]
         while not time_step.is_last():
             action_step = policy.action(time_step)
-            action = action_step.action
-            if hasattr(action, "numpy"):
-                action = action.numpy()
-                # Remove batch dim if present
-                if hasattr(action, "shape") and action.ndim > 1 and action.shape[0] == 1:
-                    action = action[0]
-            time_step = env.step(action)
+            batched_action = action_step.action  # already shape [1, action_dim]
+            time_step = tf_env.step(batched_action)
+            # Underlying env state is the wrapped `env`
             diff = env._env_map.difference(env._target_map)
             rmse_series.append(np.sqrt(np.mean(diff**2)))
         # compute per-episode metrics
