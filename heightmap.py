@@ -1,10 +1,13 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from numpy.random import default_rng
 import numba
+from functools import lru_cache
 
-# Cache for Perlin gradients keyed by (res_x, res_y, seed)
-_perlin_gradients_cache = {}
+@lru_cache(maxsize=32)
+def _get_perlin_gradients(res_0, res_1, seed):
+    rng = default_rng(seed)
+    angles = 2 * np.pi * rng.random((res_0 + 1, res_1 + 1))
+    return np.stack((np.cos(angles), np.sin(angles)), axis=-1)
 
 def fade(t):
     """
@@ -35,19 +38,10 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     yf = yv - yi
     u = fade(xf)
     v = fade(yf)
-    # Use a local RNG and cache gradients for this (res, seed) only if seed is not None
-    rng = default_rng(seed)
     if seed is not None:
-        key = (res_0, res_1, seed)
-        if key in _perlin_gradients_cache:
-            gradients = _perlin_gradients_cache[key]
-        else:
-            angles = 2 * np.pi * rng.random((res_0 + 1, res_1 + 1))
-            gradients = np.stack((np.cos(angles), np.sin(angles)), axis=-1)
-            _perlin_gradients_cache[key] = gradients
+        gradients = _get_perlin_gradients(res_0, res_1, seed)
     else:
-        angles = 2 * np.pi * rng.random((res_0 + 1, res_1 + 1))
-        gradients = np.stack((np.cos(angles), np.sin(angles)), axis=-1)
+        gradients = _get_perlin_gradients(res_0, res_1, seed)
 
     def dot_grad(ix, iy, x, y):
         g = gradients[ix % (res_0 + 1), iy % (res_1 + 1)]
@@ -61,12 +55,18 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     x1 = n00 * (1 - u) + n10 * u
     x2 = n01 * (1 - u) + n11 * u
     noise = x1 * (1 - v) + x2 * v
-    noise = (noise - noise.min()) / (noise.max() - noise.min())
-    return noise * amplitude
+    mn, mx = noise.min(), noise.max()
+    denom = mx - mn
+    if denom > 0:
+        noise = (noise - mn) / denom
+    else:
+        noise = np.zeros_like(noise)
+    noise = noise * np.float32(amplitude)
+    return noise.astype(np.float32)
 
 
 # JIT-accelerated spherical press carve for HeightMap
-@numba.njit
+@numba.njit(cache=True, nogil=True)
 def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz, bedrock=0):
     """
     JIT-compiled spherical press carve. Modifies map_arr in-place and returns volume removed.
@@ -127,7 +127,7 @@ class HeightMap:
         self._press_mask = dx*dx + dy*dy <= r*r
         self._press_dist2 = dx*dx + dy*dy
         # Precompute offset from z_start for a full sphere carve (r - sqrt(r^2 - dist2))
-        self._press_offset = np.zeros_like(self._press_dist2, dtype=float)
+        self._press_offset = np.zeros_like(self._press_dist2, dtype=np.float32)
         self._press_offset[self._press_mask] = (
             r - np.sqrt(r*r - self._press_dist2[self._press_mask])
         )
@@ -142,6 +142,7 @@ class HeightMap:
         # Running sum and count for fast mean-centered diff
         self._size = self.width * self.height
         self._sum = float(np.sum(self.map))
+        self._mean = self._sum / self._size
 
     def apply_press(self, x, y, dz):
         """
@@ -152,6 +153,7 @@ class HeightMap:
                                   self.tool_radius, x, y, dz, self.bedrock)
         # Update running sum for fast mean recompute
         self._sum -= removed
+        self._mean = self._sum / self._size
         return removed
 
     def apply_press_abs(self, x, y, z_abs, dz_rel):
@@ -176,81 +178,8 @@ class HeightMap:
         removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
                                    self.tool_radius, x, y, dz_effective, self.bedrock)
         self._sum -= removed
+        self._mean = self._sum / self._size
         return removed, True
-
-    def apply_press_py(self, x, y, dz):
-        """
-        NumPy-based spherical press carve. Modifies self.map in-place and returns volume removed.
-        """
-        r = self.tool_radius
-        # Determine integer center, clamped so full mask fits
-        cy = int(np.clip(round(y), r, self.height - 1 - r))
-        cx = int(np.clip(round(x), r, self.width - 1 - r))
-        h_center = self.map[cy, cx]
-        # Precompute intrusion heights once per call using preallocated buffer
-        intr_offset = h_center - dz
-        np.add(self._press_offset, intr_offset, out=self._z_int)
-        np.maximum(self._z_int, self.bedrock, out=self._z_int)
-
-        # Compute window bounds
-        y0, y1 = cy - r, cy + r + 1
-        x0, x1 = cx - r, cx + r + 1
-
-        # Fast interior carve when whole mask lies inside map
-        if y0 >= 0 and x0 >= 0 and y1 <= self.height and x1 <= self.width:
-            sub = self.map[y0:y1, x0:x1]
-            mask = self._press_mask
-            # Compute per-pixel intrusion heights
-            # z_int = h_center - dz + self._press_offset
-            # z_int = np.maximum(z_int, self.bedrock)   # clamp
-            old_vals = sub[mask]
-            new_vals = np.minimum(old_vals, self._z_int[mask])
-            sub[mask] = new_vals
-            self.map[y0:y1, x0:x1] = sub
-            # Update running sum for fast mean recompute
-            self._sum -= removed
-            return removed
-        else:
-            # Boundary-aware carve
-            y0c, y1c = max(0, y0), min(self.height, y1)
-            x0c, x1c = max(0, x0), min(self.width, x1)
-            off_y0, off_y1 = y0c - y0, y1c - y0
-            off_x0, off_x1 = x0c - x0, x1c - x0
-
-            sub = self.map[y0c:y1c, x0c:x1c]
-            mask_sub = self._press_mask[off_y0:off_y1, off_x0:off_x1]
-            offset_sub = self._press_offset[off_y0:off_y1, off_x0:off_x1]
-            # Compute per-pixel intrusion heights
-            # z_int = h_center - dz + offset_sub
-            # z_int = np.maximum(z_int, self.bedrock)   # clamp
-            # Slice the precomputed intrusion buffer for this subwindow
-            z_int_sub = self._z_int[off_y0:off_y1, off_x0:off_x1]
-            old_vals = sub[mask_sub]
-            new_vals = np.minimum(old_vals, z_int_sub[mask_sub])
-            removed = np.sum(old_vals - new_vals)
-            sub[mask_sub] = new_vals
-            self.map[y0c:y1c, x0c:x1c] = sub
-            # Update running sum for fast mean recompute
-            self._sum -= removed
-            return removed
-
-    # def to_grayscale_image(self):
-    #     """
-    #     Convert the heightmap to a uint8 grayscale image.
-    #     """
-    #     h = self.map
-    #     h_min, h_max = h.min(), h.max()
-    #     norm = (h - h_min) / (h_max - h_min) if h_max > h_min else np.zeros_like(h)
-    #     return (norm * 255).astype(np.uint8)
-
-    # def to_rgb_image(self, cmap='terrain'):
-    #     """
-    #     Convert the heightmap to an RGB image using a matplotlib colormap.
-    #     """
-    #     norm = (self.map - self.map.min()) / (self.map.max() - self.map.min()) if self.map.max() > self.map.min() else np.zeros_like(self.map)
-    #     cm = plt.get_cmap(cmap)
-    #     rgb = cm(norm)[..., :3]
-    #     return (rgb * 255).astype(np.uint8)
 
     def difference(self, other):
         """
@@ -258,8 +187,8 @@ class HeightMap:
         :param other: Another HeightMap or a 2D array.
         :return: 2D numpy array of differences.
         """
-        # Mean-center self using running sum
-        h1 = self.map - (self._sum / self._size)
+        # Mean-center self using cached mean
+        h1 = self.map - self._mean
         # Mean-center other
         if hasattr(other, 'map') and hasattr(other, '_sum'):
             h2 = other.map - (other._sum / other._size)
