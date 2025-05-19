@@ -13,6 +13,23 @@ from tf_agents.environments import ParallelPyEnvironment
 # Additional keras imports for encoder architectures
 from tensorflow.keras import layers, models
 
+# --- CoordConv preprocessing layer ---
+class AddCoords(layers.Layer):
+    """
+    Adds two channels encoding the normalized x and y coordinates to the input tensor.
+    """
+    def call(self, x):
+        # x: [batch, H, W, C]
+        batch, h, w, _ = tf.unstack(tf.shape(x))
+        # create normalized coordinate grids in [-1,1]
+        xx = tf.linspace(-1.0, 1.0, w)
+        yy = tf.linspace(-1.0, 1.0, h)
+        xx = tf.tile(xx[tf.newaxis, tf.newaxis, :], [batch, h, 1])
+        yy = tf.tile(yy[tf.newaxis, :, tf.newaxis], [batch, 1, w])
+        xx = tf.expand_dims(xx, -1)
+        yy = tf.expand_dims(yy, -1)
+        return tf.concat([x, xx, yy], axis=-1)
+
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
@@ -101,8 +118,8 @@ def build_unet_encoder(input_shape, latent_dim=256):
     u2 = layers.Concatenate()([u2, c1])
     c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(u2)
     c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(c4)
-    flat = layers.Flatten()(c4)
-    latent = layers.Dense(latent_dim, activation='relu')(flat)
+    pooled = layers.GlobalAveragePooling2D()(c4)
+    latent = layers.Dense(latent_dim, activation='relu')(pooled)
     return models.Model(inputs, latent, name='unet_encoder')
 
 
@@ -247,14 +264,13 @@ def train(
     if encoder_type == 'cnn':
         actor_conv_params = ((32, 3, 2), (64, 3, 2))
         critic_conv_params = actor_conv_params
-        actor_preproc = None
-        critic_preproc = None
+        actor_preproc = AddCoords()
+        critic_preproc = AddCoords()
     elif encoder_type == 'unet':
         actor_conv_params = None
         critic_conv_params = None
-        # Build separate UNet encoders for actor and critic to avoid layer-copy warnings
-        actor_preproc = build_unet_encoder(observation_spec.shape)
-        critic_preproc = build_unet_encoder(observation_spec.shape)
+        actor_preproc = tf.keras.Sequential([AddCoords(), build_unet_encoder(observation_spec.shape)])
+        critic_preproc = tf.keras.Sequential([AddCoords(), build_unet_encoder(observation_spec.shape)])
     else:
         raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
@@ -268,6 +284,7 @@ def train(
     critic_net = CriticNetwork(
         input_tensor_spec=(observation_spec, action_spec),
         observation_conv_layer_params=critic_conv_params,
+        critic_preproc=critic_preproc,
         observation_fc_layer_params=None,
         action_fc_layer_params=None,
         joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
