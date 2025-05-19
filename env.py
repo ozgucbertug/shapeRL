@@ -100,10 +100,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
     #  Reward computation – easy to swap for new schemes   #
     # ---------------------------------------------------- #
     def _compute_reward(self, err_before, err_after):
-        """Return scalar reward for a press action."""
-        # Global relative improvement, normalised by episode‑initial error and squashed to [-1, 1]
-        rel_glob = (err_before - err_after) / self._err0
-        return float(np.tanh(rel_glob))
+        """Return scalar reward for a press action using log‐error improvement."""
+        # Log-space error reduction to maintain strong gradient near convergence
+        r_global = np.log(err_before + self._eps) - np.log(err_after + self._eps)
+        return float(r_global)
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
