@@ -273,13 +273,14 @@ def train(
     if encoder_type == 'cnn':
         actor_conv_params = ((32, 3, 2), (64, 3, 2))
         critic_conv_params = actor_conv_params
-        actor_preproc = AddCoords()
-        critic_preproc = AddCoords()
+        actor_preproc = None
+        critic_preproc = None
     elif encoder_type == 'unet':
         actor_conv_params = None
         critic_conv_params = None
-        actor_preproc = tf.keras.Sequential([AddCoords(), build_unet_encoder(observation_spec.shape)])
-        critic_preproc = tf.keras.Sequential([AddCoords(), build_unet_encoder(observation_spec.shape)])
+        # Build separate UNet encoders for actor and critic to avoid layer-copy warnings
+        actor_preproc = build_unet_encoder(observation_spec.shape)
+        critic_preproc = build_unet_encoder(observation_spec.shape)
     else:
         raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
@@ -293,7 +294,6 @@ def train(
     critic_net = CriticNetwork(
         input_tensor_spec=(observation_spec, action_spec),
         observation_conv_layer_params=critic_conv_params,
-        critic_preproc=critic_preproc,
         observation_fc_layer_params=None,
         action_fc_layer_params=None,
         joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
