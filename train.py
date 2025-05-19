@@ -11,7 +11,7 @@ from tf_agents.utils.common import function, Checkpointer
 from tf_agents.environments import ParallelPyEnvironment
 
 # Additional keras imports for encoder architectures
-from tensorflow.keras import layers, models
+from keras import layers, models
 
 # --- CoordConv preprocessing layer ---
 class AddCoords(layers.Layer):
@@ -105,20 +105,29 @@ def build_unet_encoder(input_shape, latent_dim=256):
     c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(p1)
     c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(c2)
     p2 = layers.MaxPool2D()(c2)
+    # Down 3
+    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(p2)
+    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(c3)
+    p3 = layers.MaxPool2D()(c3)
     # Bottleneck
-    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(p2)
+    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(p3)
     b  = layers.Conv2D(128, 3, padding='same', activation='relu')(b)
     # Up 1
     u1 = layers.UpSampling2D()(b)
-    u1 = layers.Concatenate()([u1, c2])
-    c3 = layers.Conv2D(64, 3, padding='same', activation='relu')(u1)
-    c3 = layers.Conv2D(64, 3, padding='same', activation='relu')(c3)
+    u1 = layers.Concatenate()([u1, c3])
+    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(u1)
+    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(c4)
     # Up 2
-    u2 = layers.UpSampling2D()(c3)
-    u2 = layers.Concatenate()([u2, c1])
-    c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(u2)
-    c4 = layers.Conv2D(32, 3, padding='same', activation='relu')(c4)
-    pooled = layers.GlobalAveragePooling2D()(c4)
+    u2 = layers.UpSampling2D()(c4)
+    u2 = layers.Concatenate()([u2, c2])
+    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(u2)
+    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(c5)
+    # Up 3
+    u3 = layers.UpSampling2D()(c5)
+    u3 = layers.Concatenate()([u3, c1])
+    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(u3)
+    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(c6)
+    pooled = layers.GlobalAveragePooling2D()(c6)
     latent = layers.Dense(latent_dim, activation='relu')(pooled)
     return models.Model(inputs, latent, name='unet_encoder')
 
