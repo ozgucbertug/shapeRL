@@ -92,10 +92,12 @@ class CarveActorNetwork(network.Network):
         x = self.fc2(x)
         mean = self.mean(x)
         logstd = self.logstd(x)
-        std = tf.exp(logstd)
-        # Provide a stochastic distribution for SAC (so log_prob is defined)
-        base_dist = tfp.distributions.Normal(loc=mean, scale=std)
-        dist = tfp.distributions.Independent(base_dist, reinterpreted_batch_ndims=1)
+        # Prevent extreme log-std values
+        logstd = tf.clip_by_value(logstd, -20.0, 2.0)
+        # Softplus for stable, positive scale
+        std = tf.nn.softplus(logstd) + 1e-6
+        # Build a Normal distribution for SAC (no sampling here)
+        dist = tfp.distributions.Normal(loc=mean, scale=std)
         return dist, network_state
 
 class CarveCriticNetwork(network.Network):
