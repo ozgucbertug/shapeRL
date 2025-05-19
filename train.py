@@ -49,12 +49,17 @@ class CoordConv(layers.Layer):
         super().build(input_shape)
 
     def call(self, x):
-        # Assume batched input [B, H, W, C]
-        batch = tf.shape(x)[0]
-        # Expand precomputed coords to batch size
-        coords = tf.tile(self.coords, [batch, 1, 1, 1])
+        # Handle unbatched input by adding batch dimension
+        squeeze_out = False
+        if x.shape.ndims == 3:
+            x = tf.expand_dims(x, axis=0)
+            squeeze_out = True
+        batch_size = tf.shape(x)[0]
+        coords = tf.tile(self.coords, [batch_size, 1, 1, 1])
         conv_input = tf.concat([x, coords], axis=-1)
         out = self.conv(conv_input)
+        if squeeze_out:
+            out = tf.squeeze(out, axis=0)
         return out
 
 class FPNBlock(layers.Layer):
@@ -75,6 +80,11 @@ class FPNBlock(layers.Layer):
         super().build(input_shape)
 
     def call(self, x):
+        # Handle unbatched input [H,W,C]
+        squeeze_out = False
+        if x.shape.ndims == 3:
+            x = tf.expand_dims(x, axis=0)
+            squeeze_out = True
         y = self.conv1(x)
         y = self.bn1(y)
         y = self.relu(y)
@@ -84,7 +94,10 @@ class FPNBlock(layers.Layer):
             x_proj = self.shortcut(x)
         else:
             x_proj = x
-        return self.relu(x_proj + y)
+        out = self.relu(x_proj + y)
+        if squeeze_out:
+            out = tf.squeeze(out, axis=0)
+        return out
 
 class FPNEncoder(layers.Layer):
     def __init__(self, filters_list=(32, 64, 128), latent_dim=128, **kwargs):
@@ -102,6 +115,11 @@ class FPNEncoder(layers.Layer):
         self.global_pool = layers.GlobalAveragePooling2D()
         self.latent = layers.Dense(latent_dim, activation='relu')
     def call(self, x):
+        # Handle unbatched input [H, W, C]
+        squeeze_out = False
+        if x.shape.ndims == 3:
+            x = tf.expand_dims(x, axis=0)
+            squeeze_out = True
         # Bottom-up pass
         x = self.coordconv(x)
         c_feats = []
@@ -118,7 +136,10 @@ class FPNEncoder(layers.Layer):
         # Merge multi-scale features
         merged = tf.concat([self.merge_upsamples[i](p_levels[i]) for i in range(len(p_levels))], axis=-1)
         x = self.global_pool(merged)
-        return self.latent(x)
+        x = self.latent(x)
+        if squeeze_out:
+            x = tf.squeeze(x, axis=0)
+        return x
     
 class SpatialSoftmax(layers.Layer):
     def __init__(self, **kwargs):
@@ -150,6 +171,11 @@ class CarveActorNetwork(network.Network):
         self.mean = layers.Dense(action_spec.shape[0])
         self.logstd = layers.Dense(action_spec.shape[0])
     def call(self, observations, step_type=None, network_state=(), training=False):
+        # Handle unbatched input [H, W, C]
+        squeeze_out = False
+        if observations.shape.ndims == 3:
+            observations = tf.expand_dims(observations, axis=0)
+            squeeze_out = True
         x = tf.cast(observations, tf.float32)
         x = self.encoder(x)
         x = self.fc1(x)
@@ -355,6 +381,9 @@ def compute_eval(env, policy, num_episodes=10):
             action = action_step.action
             if hasattr(action, "numpy"):
                 action = action.numpy()
+                # Remove batch dim if present
+                if hasattr(action, "shape") and action.ndim > 1 and action.shape[0] == 1:
+                    action = action[0]
             time_step = env.step(action)
             diff = env._env_map.difference(env._target_map)
             rmse_series.append(np.sqrt(np.mean(diff**2)))
@@ -494,7 +523,7 @@ def train(
         sample_batch_size=batch_size,
         num_steps=2,
         single_deterministic_pass=False
-    ).prefetch(2)
+    ).prefetch(tf.data.AUTOTUNE)
     iterator = iter(dataset)
 
     collect_driver = DynamicStepDriver(
@@ -604,7 +633,7 @@ def main(_argv=None):
     parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
     parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
+    parser.add_argument('--eval_interval', type=int, default=10, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
