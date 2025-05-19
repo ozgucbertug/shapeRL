@@ -34,17 +34,26 @@ class CoordConv(layers.Layer):
     def __init__(self, filters=32, kernel_size=1, **kwargs):
         super().__init__(**kwargs)
         self.conv = layers.Conv2D(filters, kernel_size, padding='same', activation='relu')
-    def call(self, x):
-        batch, h, w, _ = tf.unstack(tf.shape(x))
+        self.coords = None
+
+    def build(self, input_shape):
+        # Precompute coordinate grid [1, H, W, 2]
+        batch_dim, h, w, _ = input_shape
         xx = tf.linspace(-1.0, 1.0, w)
         yy = tf.linspace(-1.0, 1.0, h)
-        xx = tf.tile(xx[tf.newaxis, tf.newaxis, :], [batch, h, 1])
-        yy = tf.tile(yy[tf.newaxis, :, tf.newaxis], [batch, 1, w])
-        xx = tf.expand_dims(xx, -1)
-        yy = tf.expand_dims(yy, -1)
-        coords = tf.concat([xx, yy], axis=-1)
-        x = tf.concat([x, coords], axis=-1)
-        return self.conv(x)
+        xx = tf.reshape(xx, [1, 1, w])
+        xx = tf.tile(xx, [1, h, 1])
+        yy = tf.reshape(yy, [1, h, 1])
+        yy = tf.tile(yy, [1, 1, w])
+        self.coords = tf.stack([xx, yy], axis=-1)  # shape [1,h,w,2]
+        super().build(input_shape)
+
+    def call(self, x):
+        # x is expected to be [B, H, W, C]
+        batch_size = tf.shape(x)[0]
+        coords = tf.tile(self.coords, [batch_size, 1, 1, 1])
+        conv_input = tf.concat([x, coords], axis=-1)
+        return self.conv(conv_input)
 
 class FPNBlock(layers.Layer):
     def __init__(self, filters, **kwargs):
@@ -73,7 +82,8 @@ class FPNBlock(layers.Layer):
             x_proj = self.shortcut(x)
         else:
             x_proj = x
-        return self.relu(x_proj + y)
+        out = self.relu(x_proj + y)
+        return out
 
 class FPNEncoder(layers.Layer):
     def __init__(self, filters_list=(32, 64, 128), latent_dim=128, **kwargs):
@@ -145,12 +155,19 @@ class CarveActorNetwork(network.Network):
         x = self.fc2(x)
         mean = self.mean(x)
         logstd = self.logstd(x)
-        # Prevent extreme log-std values
-        logstd = tf.clip_by_value(logstd, -20.0, 2.0)
-        # Softplus for stable, positive scale
-        std = tf.nn.softplus(logstd) + 1e-6
-        # Build a multivariate Normal distribution for SAC
-        dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
+        # Prevent extreme log-std values and enforce minimum scale
+        logstd = tf.clip_by_value(logstd, -5.0, 2.0)
+        std = tf.nn.softplus(logstd) + 1e-3
+
+        # Base Gaussian distribution
+        base_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
+        # Squash with tanh to [-1,1], then scale to [–0.5,0.5] and shift to [0,1]
+        bijector = tfp.bijectors.Chain([
+            tfp.bijectors.Shift(shift=0.5),
+            tfp.bijectors.Scale(scale=0.5),
+            tfp.bijectors.Tanh()
+        ])
+        dist = tfp.distributions.TransformedDistribution(distribution=base_dist, bijector=bijector)
         return dist, network_state
 
 class CarveCriticNetwork(network.Network):
@@ -321,12 +338,14 @@ def compute_eval(env, policy, num_episodes=10):
       - init_rmse_mean, final_rmse_mean, delta_rmse_mean, rel_improve_mean, auc_rmse_mean, slope_rmse_mean
       - and per-episode lists for each metric.
     """
+    # Wrap raw env for policy calls
+    tf_env = tf_py_environment.TFPyEnvironment(env)
     delta_rmses = []
     rel_improves = []
     auc_rmses = []
     slopes = []
     for _ in range(num_episodes):
-        time_step = env.reset()
+        time_step = tf_env.reset()
         # initial RMSE before any actions
         diff0 = env._env_map.difference(env._target_map)
         rmse0 = np.sqrt(np.mean(diff0**2))
@@ -334,10 +353,9 @@ def compute_eval(env, policy, num_episodes=10):
         rmse_series = [rmse0]
         while not time_step.is_last():
             action_step = policy.action(time_step)
-            action = action_step.action
-            if hasattr(action, "numpy"):
-                action = action.numpy()
-            time_step = env.step(action)
+            batched_action = action_step.action  # already shape [1, action_dim]
+            time_step = tf_env.step(batched_action)
+            # Underlying env state is the wrapped `env`
             diff = env._env_map.difference(env._target_map)
             rmse_series.append(np.sqrt(np.mean(diff**2)))
         # compute per-episode metrics
@@ -382,7 +400,7 @@ def train(
         tf.random.set_seed(seed)
     # Hyperparameters
     replay_buffer_capacity = 16384
-    learning_rate = 3e-4
+    learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
 
@@ -443,9 +461,9 @@ def train(
         action_spec=action_spec,
         actor_network=actor_net,
         critic_network=critic_net,
-        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
-        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
-        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
+        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
         target_update_tau=0.005,
         target_update_period=1,
         td_errors_loss_fn=tf.math.squared_difference,
@@ -476,7 +494,7 @@ def train(
         sample_batch_size=batch_size,
         num_steps=2,
         single_deterministic_pass=False
-    ).prefetch(2)
+    ).prefetch(tf.data.AUTOTUNE)
     iterator = iter(dataset)
 
     collect_driver = DynamicStepDriver(
@@ -586,7 +604,7 @@ def main(_argv=None):
     parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
     parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
+    parser.add_argument('--eval_interval', type=int, default=10, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
