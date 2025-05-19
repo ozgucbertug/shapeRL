@@ -382,7 +382,7 @@ def train(
         tf.random.set_seed(seed)
     # Hyperparameters
     replay_buffer_capacity = 16384
-    learning_rate = 3e-4
+    learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
 
@@ -443,9 +443,9 @@ def train(
         action_spec=action_spec,
         actor_network=actor_net,
         critic_network=critic_net,
-        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
-        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
-        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate),
+        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
         target_update_tau=0.005,
         target_update_period=1,
         td_errors_loss_fn=tf.math.squared_difference,
