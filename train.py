@@ -13,6 +13,11 @@ from tf_agents.environments import ParallelPyEnvironment
 # Additional keras imports for encoder architectures
 from keras import layers, models
 
+import tensorflow_probability as tfp
+from tf_agents.networks import network
+from tf_agents.specs import tensor_spec
+from tf_agents.trajectories import time_step as ts
+
 # --- CoordConv preprocessing layer ---
 class AddCoords(layers.Layer):
     """
@@ -30,6 +35,88 @@ class AddCoords(layers.Layer):
         yy = tf.expand_dims(yy, -1)
         return tf.concat([x, xx, yy], axis=-1)
 
+
+# ==================== FPN/CoordConv/Custom Actor & Critic ====================
+class CoordConv(layers.Layer):
+    def __init__(self, filters, kernel_size, strides=(1, 1), activation=None, **kwargs):
+        super().__init__(**kwargs)
+        self.addcoords = AddCoords()
+        self.conv = layers.Conv2D(filters, kernel_size, strides=strides, padding='same', activation=activation)
+    def call(self, x):
+        x = self.addcoords(x)
+        return self.conv(x)
+
+class FPNBlock(layers.Layer):
+    def __init__(self, filters, **kwargs):
+        super().__init__(**kwargs)
+        self.conv1 = layers.Conv2D(filters, 3, padding='same', activation='relu')
+        self.conv2 = layers.Conv2D(filters, 3, padding='same', activation='relu')
+    def call(self, x):
+        x = self.conv1(x)
+        x = self.conv2(x)
+        return x
+
+class FPNEncoder(layers.Layer):
+    def __init__(self, filters_list=(32, 64, 128), latent_dim=128, **kwargs):
+        super().__init__(**kwargs)
+        self.coordconv = CoordConv(filters_list[0], 3, activation='relu')
+        self.downs = []
+        for f in filters_list:
+            self.downs.append(FPNBlock(f))
+        self.pools = [layers.MaxPool2D() for _ in filters_list]
+        self.global_pool = layers.GlobalAveragePooling2D()
+        self.latent = layers.Dense(latent_dim, activation='relu')
+    def call(self, x):
+        x = self.coordconv(x)
+        for block, pool in zip(self.downs, self.pools):
+            x = block(x)
+            x = pool(x)
+        x = self.global_pool(x)
+        x = self.latent(x)
+        return x
+
+class CarveActorNetwork(network.Network):
+    def __init__(self, observation_spec, action_spec, name='CarveActorNetwork'):
+        super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
+        self._action_spec = action_spec
+        self.encoder = FPNEncoder(latent_dim=128)
+        self.fc1 = layers.Dense(128, activation='relu')
+        self.fc2 = layers.Dense(64, activation='relu')
+        # Output mean/logstd for each action dimension
+        self.mean = layers.Dense(action_spec.shape[0])
+        self.logstd = layers.Dense(action_spec.shape[0])
+    def call(self, observations, step_type=None, network_state=(), training=False):
+        x = tf.cast(observations, tf.float32)
+        x = self.encoder(x)
+        x = self.fc1(x)
+        x = self.fc2(x)
+        mean = self.mean(x)
+        logstd = self.logstd(x)
+        std = tf.exp(logstd)
+        # Provide a stochastic distribution for SAC (so log_prob is defined)
+        base_dist = tfp.distributions.Normal(loc=mean, scale=std)
+        dist = tfp.distributions.Independent(base_dist, reinterpreted_batch_ndims=1)
+        return dist, network_state
+
+class CarveCriticNetwork(network.Network):
+    def __init__(self, observation_spec, action_spec, name='CarveCriticNetwork'):
+        super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
+        self.encoder = FPNEncoder(latent_dim=128)
+        self.action_fc = layers.Dense(64, activation='relu')
+        self.concat_fc1 = layers.Dense(128, activation='relu')
+        self.concat_fc2 = layers.Dense(64, activation='relu')
+        self.q_out = layers.Dense(1)
+    def call(self, inputs, step_type=None, network_state=(), training=False):
+        obs, actions = inputs
+        obs = tf.cast(obs, tf.float32)
+        x = self.encoder(obs)
+        a = self.action_fc(actions)
+        x = tf.concat([x, a], axis=-1)
+        x = self.concat_fc1(x)
+        x = self.concat_fc2(x)
+        q = self.q_out(x)
+        return tf.squeeze(q, axis=-1), network_state
+
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
 import numpy as np
@@ -40,6 +127,129 @@ from tf_agents.system.system_multiprocessing import handle_main
 import os
 from matplotlib import colors
 from datetime import datetime
+
+# --- FPN/UNet-based actor & critic networks ---
+import tensorflow_probability as tfp
+from tf_agents.networks import network
+
+class CoordConv(layers.Layer):
+    def call(self, x):
+        batch, h, w, _ = tf.unstack(tf.shape(x))
+        xx = tf.linspace(-1.0, 1.0, w)
+        yy = tf.linspace(-1.0, 1.0, h)
+        xx = tf.tile(xx[tf.newaxis, tf.newaxis, :], [batch, h, 1])
+        yy = tf.tile(yy[tf.newaxis, :, tf.newaxis], [batch, 1, w])
+        xx = tf.expand_dims(xx, -1)
+        yy = tf.expand_dims(yy, -1)
+        return tf.concat([x, xx, yy], axis=-1)
+
+class UNetEncoder(layers.Layer):
+    def __init__(self, input_shape, latent_channels=64, **kwargs):
+        super().__init__(**kwargs)
+        # Downsample
+        self.conv1 = layers.Conv2D(32,3,padding='same',activation='relu')
+        self.conv1b = layers.Conv2D(32,3,padding='same',activation='relu')
+        self.pool1  = layers.MaxPool2D()
+        self.conv2 = layers.Conv2D(64,3,padding='same',activation='relu')
+        self.conv2b = layers.Conv2D(64,3,padding='same',activation='relu')
+        self.pool2  = layers.MaxPool2D()
+        # Bottleneck
+        self.conv3 = layers.Conv2D(128,3,padding='same',activation='relu')
+        self.conv3b = layers.Conv2D(128,3,padding='same',activation='relu')
+        # Upsample
+        self.up1   = layers.UpSampling2D()
+        self.conv4 = layers.Conv2D(64,3,padding='same',activation='relu')
+        self.conv4b = layers.Conv2D(64,3,padding='same',activation='relu')
+        self.up2   = layers.UpSampling2D()
+        self.conv5 = layers.Conv2D(32,3,padding='same',activation='relu')
+        self.conv5b = layers.Conv2D(32,3,padding='same',activation='relu')
+
+    def call(self, x):
+        c1 = self.conv1(x); c1 = self.conv1b(c1)
+        p1 = self.pool1(c1)
+        c2 = self.conv2(p1); c2 = self.conv2b(c2)
+        p2 = self.pool2(c2)
+        b  = self.conv3(p2); b  = self.conv3b(b)
+        u1 = self.up1(b)
+        u1 = tf.concat([u1, c2], axis=-1)
+        c4 = self.conv4(u1); c4 = self.conv4b(c4)
+        u2 = self.up2(c4)
+        u2 = tf.concat([u2, c1], axis=-1)
+        c5 = self.conv5(u2); c5 = self.conv5b(c5)
+        return c5  # shape H×W×32
+
+class SpatialSoftmax(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+    def call(self, logits):
+        # logits: [B,H,W,1]
+        # Extract batch and spatial dims without Python iteration
+        shape_un = tf.unstack(tf.shape(logits))
+        b = shape_un[0]
+        h = shape_un[1]
+        w = shape_un[2]
+        flat = tf.reshape(logits, [b, h * w])
+        prob = tf.nn.softmax(flat)
+        coords_x, coords_y = tf.meshgrid(
+            tf.linspace(0.0, 1.0, w), tf.linspace(0.0, 1.0, h)
+        )
+        coords = tf.stack([tf.reshape(coords_x, [-1]), tf.reshape(coords_y, [-1])], axis=1)
+        exp = tf.matmul(prob, coords)
+        return exp  # [B,2]
+
+class CarveActorNetwork(network.Network):
+    def __init__(self, obs_spec, action_spec, name='CarveActor', **kwargs):
+        super().__init__(input_tensor_spec=obs_spec, state_spec=(), name=name, **kwargs)
+        self._coord = CoordConv()
+        self._encoder = UNetEncoder(obs_spec.shape)
+        self._loc_logits = layers.Conv2D(1,1)
+        self._spatial_softmax = SpatialSoftmax()
+        self._depth_fc = layers.Dense(64, activation='relu')
+        self._depth_mu = layers.Dense(1)
+        self._depth_logstd = layers.Dense(1)
+
+    def call(self, observation, step_type=None, network_state=()):
+        x = tf.cast(observation, tf.float32)
+        x = self._coord(x)
+        features = self._encoder(x)  # [B,H,W,32]
+        logits = self._loc_logits(features)  # [B,H,W,1]
+        loc = self._spatial_softmax(logits)  # [B,2]
+        pooled = tf.reduce_mean(features, axis=[1,2])  # [B,32]
+        h = self._depth_fc(pooled)
+        mu = self._depth_mu(h)
+        logstd = self._depth_logstd(h)
+        std = tf.exp(logstd)
+        # Combine location and depth into a single vector distribution
+        loc_all = tf.concat([loc, mu], axis=-1)           # [B,3]
+        scale_xy = tf.fill(tf.shape(loc), 0.1)            # [B,2]
+        scale_all = tf.concat([scale_xy, std], axis=-1)   # [B,3]
+        dist = tfp.distributions.Independent(
+            tfp.distributions.Normal(loc=loc_all, scale=scale_all),
+            reinterpreted_batch_ndims=1)
+        return dist, network_state
+
+class CarveCriticNetwork(network.Network):
+    def __init__(self, obs_spec, action_spec, name='CarveCritic', **kwargs):
+        super().__init__(input_tensor_spec=(obs_spec, action_spec), state_spec=(), name=name, **kwargs)
+        self._coord = CoordConv()
+        self._encoder = UNetEncoder(obs_spec.shape)
+        self._action_proj = layers.Dense(32, activation='relu')
+        self._joint_fc = tf.keras.Sequential([
+            layers.Dense(256, activation='relu'),
+            layers.Dense(128, activation='relu'),
+            layers.Dense(1)
+        ])
+
+    def call(self, inputs, step_type=None, network_state=()):
+        obs, action = inputs
+        x = tf.cast(obs, tf.float32)
+        x = self._coord(x)
+        features = self._encoder(x)
+        pooled = tf.reduce_mean(features, axis=[1,2])  # [B,32]
+        a_proj = self._action_proj(action)              # [B,32]
+        joint = tf.concat([pooled, a_proj], axis=-1)
+        q = self._joint_fc(joint)                       # [B,1]
+        return tf.squeeze(q, -1), network_state
 
 # --- Heuristic policy imports ---
 from tf_agents.policies import py_policy
@@ -278,27 +488,33 @@ def train(
     elif encoder_type == 'unet':
         actor_conv_params = None
         critic_conv_params = None
-        # Build separate UNet encoders for actor and critic to avoid layer-copy warnings
         actor_preproc = build_unet_encoder(observation_spec.shape)
         critic_preproc = build_unet_encoder(observation_spec.shape)
+    elif encoder_type == 'fpn':
+        actor_net = CarveActorNetwork(observation_spec, action_spec)
+        critic_net = CarveCriticNetwork(observation_spec, action_spec)
     else:
         raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
-    actor_net = actor_distribution_network.ActorDistributionNetwork(
-        input_tensor_spec=observation_spec,
-        output_tensor_spec=action_spec,
-        preprocessing_layers=actor_preproc,
-        conv_layer_params=actor_conv_params,
-        fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
-    )
-    critic_net = CriticNetwork(
-        input_tensor_spec=(observation_spec, action_spec),
-        observation_conv_layer_params=critic_conv_params,
-        observation_fc_layer_params=None,
-        action_fc_layer_params=None,
-        joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
-        name='critic_network'
-    )
+    if encoder_type == 'fpn':
+        # networks already set
+        pass
+    else:
+        actor_net = actor_distribution_network.ActorDistributionNetwork(
+            input_tensor_spec=observation_spec,
+            output_tensor_spec=action_spec,
+            preprocessing_layers=actor_preproc,
+            conv_layer_params=actor_conv_params,
+            fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
+        )
+        critic_net = CriticNetwork(
+            input_tensor_spec=(observation_spec, action_spec),
+            observation_conv_layer_params=critic_conv_params,
+            observation_fc_layer_params=None,
+            action_fc_layer_params=None,
+            joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
+            name='critic_network'
+        )
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tf_agent = sac_agent.SacAgent(
@@ -445,15 +661,15 @@ def train(
 def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=32, help='Number of parallel environments for training')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for training')
+    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
+    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
     parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
     parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='unet', choices=['cnn', 'unet'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--encoder', type=str, default='fpn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
 
     args = parser.parse_args()
     
