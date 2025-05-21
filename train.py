@@ -10,11 +10,6 @@ from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.utils.common import function, Checkpointer
 from tf_agents.environments import ParallelPyEnvironment
 
-# Additional keras imports for encoder architectures
-from keras import layers, models
-
-import tensorflow_probability as tfp
-from tf_agents.networks import network
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step as ts
 
@@ -29,165 +24,8 @@ import os
 from matplotlib import colors
 from datetime import datetime
 
-# ==================== FPN/CoordConv/Custom Actor & Critic ====================
-class CoordConv(layers.Layer):
-    def __init__(self, filters=32, kernel_size=1, **kwargs):
-        super().__init__(**kwargs)
-        self.conv = layers.Conv2D(filters, kernel_size, padding='same', activation='relu')
-        self.coords = None
-
-    def build(self, input_shape):
-        # Precompute coordinate grid [1, H, W, 2]
-        batch_dim, h, w, _ = input_shape
-        xx = tf.linspace(-1.0, 1.0, w)
-        yy = tf.linspace(-1.0, 1.0, h)
-        xx = tf.reshape(xx, [1, 1, w])
-        xx = tf.tile(xx, [1, h, 1])
-        yy = tf.reshape(yy, [1, h, 1])
-        yy = tf.tile(yy, [1, 1, w])
-        self.coords = tf.stack([xx, yy], axis=-1)  # shape [1,h,w,2]
-        super().build(input_shape)
-
-    def call(self, x):
-        # x is expected to be [B, H, W, C]
-        batch_size = tf.shape(x)[0]
-        coords = tf.tile(self.coords, [batch_size, 1, 1, 1])
-        conv_input = tf.concat([x, coords], axis=-1)
-        return self.conv(conv_input)
-
-class FPNBlock(layers.Layer):
-    def __init__(self, filters, **kwargs):
-        super().__init__(**kwargs)
-        self.filters = filters
-        self.shortcut = None
-        self.conv1 = layers.Conv2D(filters, 3, padding='same')
-        self.bn1 = layers.BatchNormalization()
-        self.conv2 = layers.Conv2D(filters, 3, padding='same')
-        self.bn2 = layers.BatchNormalization()
-        self.relu = layers.Activation('relu')
-
-    def build(self, input_shape):
-        input_channels = input_shape[-1]
-        if input_channels != self.filters:
-            self.shortcut = layers.Conv2D(self.filters, 1, padding='same')
-        super().build(input_shape)
-
-    def call(self, x):
-        y = self.conv1(x)
-        y = self.bn1(y)
-        y = self.relu(y)
-        y = self.conv2(y)
-        y = self.bn2(y)
-        if self.shortcut is not None:
-            x_proj = self.shortcut(x)
-        else:
-            x_proj = x
-        out = self.relu(x_proj + y)
-        return out
-
-class FPNEncoder(layers.Layer):
-    def __init__(self, filters_list=(32, 64, 128), latent_dim=128, **kwargs):
-        super().__init__(**kwargs)
-        self.coordconv = CoordConv()
-        self.downs = []
-        for f in filters_list:
-            self.downs.append(FPNBlock(f))
-        self.pools = [layers.MaxPool2D() for _ in filters_list]
-        # FPN lateral and upsample layers
-        fpn_channels = filters_list[-1]
-        self.lateral_convs = [layers.Conv2D(fpn_channels, 1, padding='same') for _ in filters_list]
-        self.upsamples     = [layers.UpSampling2D(size=2) for _ in filters_list[:-1]]
-        self.merge_upsamples = [layers.UpSampling2D(size=2**i) for i in range(len(filters_list))]
-        self.global_pool = layers.GlobalAveragePooling2D()
-        self.latent = layers.Dense(latent_dim, activation='relu')
-    def call(self, x):
-        # Bottom-up pass
-        x = self.coordconv(x)
-        c_feats = []
-        for block, pool in zip(self.downs, self.pools):
-            x = block(x)
-            c_feats.append(x)
-            x = pool(x)
-        # Top-down lateral fusion
-        p_levels = [None] * len(c_feats)
-        last = len(c_feats) - 1
-        p_levels[last] = self.lateral_convs[last](c_feats[last])
-        for i in range(last - 1, -1, -1):
-            p_levels[i] = self.lateral_convs[i](c_feats[i]) + self.upsamples[i](p_levels[i+1])
-        # Merge multi-scale features
-        merged = tf.concat([self.merge_upsamples[i](p_levels[i]) for i in range(len(p_levels))], axis=-1)
-        x = self.global_pool(merged)
-        return self.latent(x)
-    
-class SpatialSoftmax(layers.Layer):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-    def call(self, logits):
-        # logits: [B,H,W,1]
-        # Extract batch and spatial dims without Python iteration
-        shape_un = tf.unstack(tf.shape(logits))
-        b = shape_un[0]
-        h = shape_un[1]
-        w = shape_un[2]
-        flat = tf.reshape(logits, [b, h * w])
-        prob = tf.nn.softmax(flat)
-        coords_x, coords_y = tf.meshgrid(
-            tf.linspace(0.0, 1.0, w), tf.linspace(0.0, 1.0, h)
-        )
-        coords = tf.stack([tf.reshape(coords_x, [-1]), tf.reshape(coords_y, [-1])], axis=1)
-        exp = tf.matmul(prob, coords)
-        return exp  # [B,2]
-
-class CarveActorNetwork(network.Network):
-    def __init__(self, observation_spec, action_spec, name='CarveActorNetwork'):
-        super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
-        self._action_spec = action_spec
-        self.encoder = FPNEncoder(latent_dim=128)
-        self.fc1 = layers.Dense(128, activation='relu')
-        self.fc2 = layers.Dense(64, activation='relu')
-        # Output mean/logstd for each action dimension
-        self.mean = layers.Dense(action_spec.shape[0])
-        self.logstd = layers.Dense(action_spec.shape[0])
-    def call(self, observations, step_type=None, network_state=(), training=False):
-        x = tf.cast(observations, tf.float32)
-        x = self.encoder(x)
-        x = self.fc1(x)
-        x = self.fc2(x)
-        mean = self.mean(x)
-        logstd = self.logstd(x)
-        # Prevent extreme log-std values and enforce minimum scale
-        logstd = tf.clip_by_value(logstd, -5.0, 2.0)
-        std = tf.nn.softplus(logstd) + 1e-3
-
-        # Base Gaussian distribution
-        base_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=std)
-        # Squash with tanh to [-1,1], then scale to [–0.5,0.5] and shift to [0,1]
-        bijector = tfp.bijectors.Chain([
-            tfp.bijectors.Shift(shift=0.5),
-            tfp.bijectors.Scale(scale=0.5),
-            tfp.bijectors.Tanh()
-        ])
-        dist = tfp.distributions.TransformedDistribution(distribution=base_dist, bijector=bijector)
-        return dist, network_state
-
-class CarveCriticNetwork(network.Network):
-    def __init__(self, observation_spec, action_spec, name='CarveCriticNetwork'):
-        super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
-        self.encoder = FPNEncoder(latent_dim=128)
-        self.action_fc = layers.Dense(64, activation='relu')
-        self.concat_fc1 = layers.Dense(128, activation='relu')
-        self.concat_fc2 = layers.Dense(64, activation='relu')
-        self.q_out = layers.Dense(1)
-    def call(self, inputs, step_type=None, network_state=(), training=False):
-        obs, actions = inputs
-        obs = tf.cast(obs, tf.float32)
-        x = self.encoder(obs)
-        a = self.action_fc(actions)
-        x = tf.concat([x, a], axis=-1)
-        x = self.concat_fc1(x)
-        x = self.concat_fc2(x)
-        q = self.q_out(x)
-        return tf.squeeze(q, axis=-1), network_state
+# Import custom networks from networks.py
+from networks import make_actor_critic
 
 # --- Heuristic policy imports ---
 from tf_agents.policies import py_policy
@@ -238,46 +76,6 @@ def visualize(fig, axes, cbars, env, step, max_amp):
     fig.tight_layout()
 
 
-# ---------- UNet Encoder ----------------------------------------------------
-def build_unet_encoder(input_shape, latent_dim=256):
-    """
-    Returns a keras.Model that maps an (H,W,C) observation to a latent vector
-    of length `latent_dim`.  A lightweight 2‑down 2‑up UNet.
-    """
-    inputs = layers.Input(shape=input_shape)
-    # Down 1
-    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
-    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(c1)
-    p1 = layers.MaxPool2D()(c1)
-    # Down 2
-    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(p1)
-    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(c2)
-    p2 = layers.MaxPool2D()(c2)
-    # Down 3
-    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(p2)
-    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(c3)
-    p3 = layers.MaxPool2D()(c3)
-    # Bottleneck
-    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(p3)
-    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(b)
-    # Up 1
-    u1 = layers.UpSampling2D()(b)
-    u1 = layers.Concatenate()([u1, c3])
-    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(u1)
-    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(c4)
-    # Up 2
-    u2 = layers.UpSampling2D()(c4)
-    u2 = layers.Concatenate()([u2, c2])
-    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(u2)
-    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(c5)
-    # Up 3
-    u3 = layers.UpSampling2D()(c5)
-    u3 = layers.Concatenate()([u3, c1])
-    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(u3)
-    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(c6)
-    pooled = layers.GlobalAveragePooling2D()(c6)
-    latent = layers.Dense(latent_dim, activation='relu')(pooled)
-    return models.Model(inputs, latent, name='unet_encoder')
 
 
 # ---------- Heuristic Policy --------------------------------------------------
@@ -384,25 +182,25 @@ def compute_eval(env, policy, num_episodes=10):
     return metrics
 
 def train(
-    num_parallel_envs=8,
-    vis_interval=1000,
-    eval_interval=1000,
-    checkpoint_interval=10000,
+    num_parallel_envs=4,
+    vis_interval=0,
+    eval_interval=0,
+    checkpoint_interval=0,
     seed=None,
-    batch_size=256,
-    collect_steps_per_iteration=5,
+    collect_steps_per_iteration=4,
     num_iterations=200000,
     use_heuristic_warmup: bool = False,
-    encoder_type: str = 'cnn'
+    encoder_type: str = 'cnn',
+    replay_buffer_capacity = 4096,
+    learning_rate = 1e-4,
+    num_eval_episodes = 4
 ):
     if seed is not None:
         np.random.seed(seed)
         tf.random.set_seed(seed)
     # Hyperparameters
-    replay_buffer_capacity = 16384
-    learning_rate = 1e-4
     gamma = 0.99
-    num_eval_episodes = 5
+    batch_size= num_parallel_envs * collect_steps_per_iteration
 
     # Create seeded Python environments for training, evaluation, and visualization
     env_fns = []
@@ -418,52 +216,17 @@ def train(
     # Network architecture
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
-    # Choose encoder architecture
-    if encoder_type == 'cnn':
-        actor_conv_params = ((32, 3, 2), (64, 3, 2))
-        critic_conv_params = actor_conv_params
-        actor_preproc = None
-        critic_preproc = None
-    elif encoder_type == 'unet':
-        actor_conv_params = None
-        critic_conv_params = None
-        actor_preproc = build_unet_encoder(observation_spec.shape)
-        critic_preproc = build_unet_encoder(observation_spec.shape)
-    elif encoder_type == 'fpn':
-        actor_net = CarveActorNetwork(observation_spec, action_spec)
-        critic_net = CarveCriticNetwork(observation_spec, action_spec)
-    else:
-        raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
-
-    if encoder_type == 'fpn':
-        # networks already set
-        pass
-    else:
-        actor_net = actor_distribution_network.ActorDistributionNetwork(
-            input_tensor_spec=observation_spec,
-            output_tensor_spec=action_spec,
-            preprocessing_layers=actor_preproc,
-            conv_layer_params=actor_conv_params,
-            fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
-        )
-        critic_net = CriticNetwork(
-            input_tensor_spec=(observation_spec, action_spec),
-            observation_conv_layer_params=critic_conv_params,
-            observation_fc_layer_params=None,
-            action_fc_layer_params=None,
-            joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
-            name='critic_network'
-        )
-
+    # Build actor and critic networks
+    actor_net, critic_net = make_actor_critic(encoder_type, observation_spec, action_spec)
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
         actor_network=actor_net,
         critic_network=critic_net,
-        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
-        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
-        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        actor_optimizer=tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0),
+        alpha_optimizer=tf.keras.optimizers.Adam(learning_rate, clipnorm=1.0),
         target_update_tau=0.005,
         target_update_period=1,
         td_errors_loss_fn=tf.math.squared_difference,
@@ -600,11 +363,10 @@ def train(
 def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
-    parser.add_argument('--batch_size', type=int, default=6, help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
+    parser.add_argument('--num_envs', type=int, default=6, help='Number of parallel environments for training')
+    parser.add_argument('--collect_steps', type=int, default=8, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=10, help='Steps between evaluation')
+    parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
@@ -617,11 +379,11 @@ def main(_argv=None):
           num_parallel_envs=args.num_envs,
           checkpoint_interval=args.checkpoint_interval,
           seed=args.seed,
-          batch_size=args.batch_size,
           collect_steps_per_iteration=args.collect_steps,
           num_iterations=args.num_iterations,
           use_heuristic_warmup=args.heuristic_warmup,
-          encoder_type=args.encoder)
+          encoder_type=args.encoder,
+          replay_buffer_capacity = 4096)
 
 if __name__ == '__main__':
     handle_main(main)
