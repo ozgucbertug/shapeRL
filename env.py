@@ -113,55 +113,62 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
 
     # ---------------------------------------------------- #
-    #  Reward computation – easy to swap for new schemes   #
+    #  Reward computation – episode‑normalised and shaped  #
     # ---------------------------------------------------- #
-    def _compute_reward(self,
-                        err_before: float,
-                        err_after: float,
-                        removed: float,
-                        touched: bool) -> float:
+    def _compute_reward(
+        self,
+        err_before: float,
+        err_after: float,
+        removed: float,
+        touched: bool
+    ) -> float:
         """
-        Compute shaped reward for a single press.
+        Robust shaped reward for a single press.
 
         Components
         ----------
-        1. Relative improvement           : (err_before - err_after) / err_before
-        2. Progress bonus                 : awarded only if improvement > 1 % of err_before
-        3. Linear volume penalty          : discourages digging when no gain is made
-        4. Efficiency bonus               : improvement per unit normalised volume
-        5. Waste penalty                  : extra cost when removed‑volume exceeds improvement
-        6. No‑touch penalty               : fixed penalty when the press missed the surface
-        The final reward is clipped to [-1, 1] for stability.
+        1. Relative improvement, normalised by the *initial* episode error:
+           rel_improve = (err_before - err_after) / (self._err0 + eps)
+        2. Progress bonus whenever a new best error is achieved (≥1 % better).
+        3. Volume cost when no improvement is made, scaled by removed volume.
+        4. Efficiency bonus: improvement per unit removed volume.
+        5. Waste penalty if more material is removed than improvement achieved.
+        6. Miss penalty if the tool did not touch the terrain.
+
+        The reward is clipped to [-5, 5] to guard against outliers.
         """
-        # --- 1) Relative improvement (self‑normalised) ----------------------
-        rel_improve = (err_before - err_after) / (err_before + self._eps)
+        # 1) Relative improvement w.r.t. episode start (signed, ∈[-1,1])
+        rel_improve = (err_before - err_after) / (self._err0 + self._eps)
+
+        # 2) Normalised removed volume in [0,1]
+        vol_norm = removed / (self._max_press_volume + self._eps)
+
+        # 3) Base reward = signed improvement
         reward = rel_improve
 
-        # --- 2) Progress bonus (only if >1 % improvement) -------------------
-        if err_before - err_after > 0.01 * err_before:
+        # 4) Positive shaping: reward efficiency when there *is* improvement
+        efficiency = rel_improve / (vol_norm + self._eps)
+        if rel_improve > 0.0:
+            reward += self._efficiency_coeff * efficiency
+        # 5) Negative shaping: penalise useless digging
+        else:
+            reward -= self._volume_penalty_coeff * vol_norm
+
+        # 6) Waste penalty when removed > improvement achieved
+        waste = max(vol_norm - rel_improve, 0.0)
+        reward -= self._waste_penalty_coeff * waste
+
+        # 7) Fixed penalty if the press missed the surface entirely
+        if not touched:
+            reward -= self._no_touch_penalty
+
+        # 8) Progress bonus on new best error (≥1 % better than previous best)
+        if err_after < (self._best_err - 0.01 * self._err0):
             reward += self._progress_bonus
+            self._best_err = err_after
 
-        # # --- 3) Volume‑based shaping ---------------------------------------
-        # # Normalised removed volume in [0,1]
-        # vol_norm = removed / (self._max_press_volume + self._eps)
-        # if rel_improve < 0.0:
-        #     reward -= self._volume_penalty_coeff * vol_norm
-
-        # # --- 4) Efficiency term: improvement per unit volume ---------------
-        # efficiency = rel_improve / (vol_norm + self._eps)
-        # reward += self._efficiency_coeff * efficiency
-
-        # # --- 5) Waste penalty ----------------------------------------------
-        # # If more volume removed than improvement achieved, penalise the excess
-        # waste = max(vol_norm - rel_improve, 0.0)
-        # reward -= self._waste_penalty_coeff * waste
-
-        # # --- 6) Miss penalty ------------------------------------------------
-        # if not touched:
-        #     reward -= self._no_touch_penalty
-
-        # --- Final safety‑clip ---------------------------------------------
-        reward = float(np.clip(reward, -1.0, 1.0))
+        # Safety‑clip
+        reward = float(np.clip(reward, -5.0, 5.0))
         return reward
     
     # ------------------------------------------------------------------ #
