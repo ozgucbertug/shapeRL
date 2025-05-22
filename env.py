@@ -69,6 +69,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Efficiency–aware volume shaping
         self._efficiency_coeff     = 0.10   # reward scale for efficient carving
         self._waste_penalty_coeff  = 0.05   # extra penalty for wasted volume
+        # Composite‑reward mixing weights
+        self._global_w = 0.7   # weight for global improvement term
+        self._local_w  = 0.3   # weight for local improvement term
+        self._local_radius = 3 * self._tool_radius   # pixels around press centre
         # Maximum volume removable by a single press (for normalisation)
         self._tool_area = np.pi * (self._tool_radius ** 2)
         self._max_press_volume = self._tool_area * (0.66 * self._tool_radius)
@@ -113,12 +117,30 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
 
     # ---------------------------------------------------- #
+    #  Local RMSE around (cx, cy) within square radius r   #
+    # ---------------------------------------------------- #
+    def _local_rmse(self, diff_map, cx, cy, r):
+        """
+        Return the RMSE of `diff_map` inside a square neighbourhood
+        centred at integer (cx, cy) with half‑width `r`.  Fast numpy
+        slice, no allocations.
+        """
+        y0 = max(cy - r, 0)
+        y1 = min(cy + r + 1, self._height)
+        x0 = max(cx - r, 0)
+        x1 = min(cx + r + 1, self._width)
+        patch = diff_map[y0:y1, x0:x1]
+        return float(np.sqrt(np.mean(patch ** 2)))
+
+    # ---------------------------------------------------- #
     #  Reward computation – episode‑normalised and shaped  #
     # ---------------------------------------------------- #
     def _compute_reward(
         self,
-        err_before: float,
-        err_after: float,
+        err_g_before: float,
+        err_g_after:  float,
+        err_l_before: float,
+        err_l_after:  float,
         removed: float,
         touched: bool
     ) -> float:
@@ -127,45 +149,46 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         Components
         ----------
-        1. Relative improvement, normalised by the *initial* episode error:
-           rel_improve = (err_before - err_after) / (self._err0 + eps)
+        1. Composite reward: weighted sum of global and local improvements:
+           rel_g = (err_g_before - err_g_after) / (self._err0 + eps)
+           rel_l = (err_l_before - err_l_after) / (err_l_before + eps)
+           reward = self._global_w * rel_g + self._local_w * rel_l
         2. Progress bonus whenever a new best error is achieved (≥1 % better).
         3. Volume cost when no improvement is made, scaled by removed volume.
-        4. Efficiency bonus: improvement per unit removed volume.
-        5. Waste penalty if more material is removed than improvement achieved.
+        4. Efficiency bonus: improvement per unit removed volume (global).
+        5. Waste penalty if more material is removed than improvement achieved (global).
         6. Miss penalty if the tool did not touch the terrain.
 
         The reward is clipped to [-5, 5] to guard against outliers.
         """
-        # 1) Relative improvement w.r.t. episode start (signed, ∈[-1,1])
-        rel_improve = (err_before - err_after) / (self._err0 + self._eps)
+        # 1) Compute relative improvements (global and local)
+        rel_g = (err_g_before - err_g_after) / (self._err0 + self._eps)
+        rel_l = (err_l_before - err_l_after) / (err_l_before + self._eps)
+        reward = self._global_w * rel_g + self._local_w * rel_l
 
         # 2) Normalised removed volume in [0,1]
         vol_norm = removed / (self._max_press_volume + self._eps)
 
-        # 3) Base reward = signed improvement
-        reward = rel_improve
-
-        # 4) Positive shaping: reward efficiency when there *is* improvement
-        efficiency = rel_improve / (vol_norm + self._eps)
-        if rel_improve > 0.0:
+        # 3) Positive shaping: reward efficiency when there *is* global improvement
+        efficiency = rel_g / (vol_norm + self._eps)
+        if rel_g > 0.0:
             reward += self._efficiency_coeff * efficiency
-        # 5) Negative shaping: penalise useless digging
+        # 4) Negative shaping: penalise useless digging
         else:
             reward -= self._volume_penalty_coeff * vol_norm
 
-        # 6) Waste penalty when removed > improvement achieved
-        waste = max(vol_norm - rel_improve, 0.0)
+        # 5) Waste penalty when removed > global improvement achieved
+        waste = max(vol_norm - rel_g, 0.0)
         reward -= self._waste_penalty_coeff * waste
 
-        # 7) Fixed penalty if the press missed the surface entirely
+        # 6) Fixed penalty if the press missed the surface entirely
         if not touched:
             reward -= self._no_touch_penalty
 
-        # 8) Progress bonus on new best error (≥1 % better than previous best)
-        if err_after < (self._best_err - 0.01 * self._err0):
+        # 7) Progress bonus on new best error (≥1 % better than previous best)
+        if err_g_after < (self._best_err - 0.01 * self._err0):
             reward += self._progress_bonus
-            self._best_err = err_after
+            self._best_err = err_g_after
 
         # Safety‑clip
         reward = float(np.clip(reward, -5.0, 5.0))
@@ -268,21 +291,25 @@ class SandShapingEnv(py_environment.PyEnvironment):
         z_abs = h_center
         dz_rel = dz_norm * (0.66 * self._tool_radius)
 
-        # Local RMSE before the press
-        diff_before = self._env_map.difference(self._target_map, out=self._work_diff)
-        err_before = np.sqrt(np.mean(diff_before**2))
+        # Global & local RMSE before the press
+        diff_before, err_g_before = self._diff_and_rmse()
+        err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
 
         # Apply press and measure removed volume
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
-        # Local RMSE after the press
-        diff_after = self._env_map.difference(self._target_map, out=self._work_diff)
-        err_after = np.sqrt(np.mean(diff_after**2))
-        reward = self._compute_reward(err_before, err_after, removed, touched)
+        # Global & local RMSE after the press
+        diff_after, err_g_after = self._diff_and_rmse()
+        err_l_after  = self._local_rmse(diff_after, cx, cy, self._local_radius)
+        reward = self._compute_reward(
+            err_g_before, err_g_after,
+            err_l_before, err_l_after,
+            removed, touched
+        )
         if self.debug:
             # expose per-step debug scalars
             self._last_removed_norm = removed / (self._max_press_volume + self._eps)
-            self._last_rel_improve = (err_before - err_after) / (err_before + self._eps)
+            self._last_rel_improve = (err_g_before - err_g_after) / (err_g_before + self._eps)
             self._last_reward = reward
 
         # ----- early‑termination checks -----
