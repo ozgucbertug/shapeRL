@@ -120,34 +120,49 @@ class SandShapingEnv(py_environment.PyEnvironment):
                         err_after: float,
                         removed: float,
                         touched: bool) -> float:
-        # --- 1) Normalised error improvement --------------------------------
-        rel_improve = (err_before - err_after) / (self._err0 + self._eps)
+        """
+        Compute shaped reward for a single press.
+
+        Components
+        ----------
+        1. Relative improvement           : (err_before - err_after) / err_before
+        2. Progress bonus                 : awarded only if improvement > 1 % of err_before
+        3. Linear volume penalty          : discourages digging when no gain is made
+        4. Efficiency bonus               : improvement per unit normalised volume
+        5. Waste penalty                  : extra cost when removed‑volume exceeds improvement
+        6. No‑touch penalty               : fixed penalty when the press missed the surface
+        The final reward is clipped to [-1, 1] for stability.
+        """
+        # --- 1) Relative improvement (self‑normalised) ----------------------
+        rel_improve = (err_before - err_after) / (err_before + self._eps)
         reward = rel_improve
 
-        # --- 2) Progress bonus when new best RMSE is achieved ---------------
-        if err_after < self._best_err - 1e-9:
+        # --- 2) Progress bonus (only if >1 % improvement) -------------------
+        if err_before - err_after > 0.01 * err_before:
             reward += self._progress_bonus
-            self._best_err = err_after
 
-        # --- 3) Efficiency‑aware volume signal ------------------------------
-        # Normalise removed volume to [0,1]
+        # --- 3) Volume‑based shaping ---------------------------------------
+        # Normalised removed volume in [0,1]
         vol_norm = removed / (self._max_press_volume + self._eps)
+        # Base linear penalty
+        reward -= self._volume_penalty_coeff * vol_norm
 
-        # Efficiency = improvement per unit volume
+        # --- 4) Efficiency term: improvement per unit volume ---------------
         efficiency = rel_improve / (vol_norm + self._eps)
-
-        # Positive incentive for high efficiency
         reward += self._efficiency_coeff * efficiency
 
-        # Additional penalty for *wasted* volume (removed more than improvement)
+        # --- 5) Waste penalty ----------------------------------------------
+        # If more volume removed than improvement achieved, penalise the excess
         waste = max(vol_norm - rel_improve, 0.0)
         reward -= self._waste_penalty_coeff * waste
 
-        # --- 4) Penalty for presses that did not touch the surface ----------
+        # --- 6) Miss penalty ------------------------------------------------
         if not touched:
             reward -= self._no_touch_penalty
 
-        return float(reward)
+        # --- Final safety‑clip ---------------------------------------------
+        reward = float(np.clip(reward, -1.0, 1.0))
+        return reward
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
