@@ -132,6 +132,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
         patch = diff_map[y0:y1, x0:x1]
         return float(np.sqrt(np.mean(patch ** 2)))
 
+    def _diff_and_rmse(self):
+        """
+        Compute and return the current diff map and its global RMSE.
+        """
+        # Re-use pre-allocated buffer for the difference
+        diff = self._env_map.difference(self._target_map, out=self._work_diff)
+        # Compute global RMSE
+        err = float(np.sqrt(np.mean(diff ** 2)))
+        return diff, err
+
     # ---------------------------------------------------- #
     #  Reward computation – episode‑normalised and shaped  #
     # ---------------------------------------------------- #
@@ -314,7 +324,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # ----- early‑termination checks -----
         # 1) success if global RMSE is sufficiently low
-        if self._terminate_on_success and err_after <= self._error_threshold:
+        if self._terminate_on_success and err_g_after <= self._error_threshold:
             self._episode_ended = True
             reward += self._success_bonus
             h = self._env_map.map
