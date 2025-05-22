@@ -61,9 +61,9 @@ class FPNBlock(layers.Layer):
         self.filters = filters
         self.shortcut = None
         self.conv1 = layers.Conv2D(filters, 3, padding='same')
-        self.bn1 = layers.BatchNormalization()
+        self.bn1 = layers.LayerNormalization()
         self.conv2 = layers.Conv2D(filters, 3, padding='same')
-        self.bn2 = layers.BatchNormalization()
+        self.bn2 = layers.LayerNormalization()
         self.relu = layers.Activation('relu')
 
     def build(self, input_shape):
