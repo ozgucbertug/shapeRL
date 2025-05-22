@@ -69,9 +69,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Efficiency–aware volume shaping
         self._efficiency_coeff     = 0.10   # reward scale for efficient carving
         self._waste_penalty_coeff  = 0.05   # extra penalty for wasted volume
-        # Composite‑reward mixing weights
-        self._global_w = 0.7   # weight for global improvement term
-        self._local_w  = 0.3   # weight for local improvement term
+        # Composite‑reward mixing weights (now dynamically set in reward)
         self._local_radius = 3 * self._tool_radius   # pixels around press centre
         # Maximum volume removable by a single press (for normalisation)
         self._tool_area = np.pi * (self._tool_radius ** 2)
@@ -176,11 +174,25 @@ class SandShapingEnv(py_environment.PyEnvironment):
                 + progress_bonus · clip(err₀ / err_g_after, 1, 10)
         7.  Final soft clip with tanh to keep gradients while bounding magnitude.
         """
+        # Dynamic curriculum on the global/local mixture:
+        # start with global_w = 0.3, linearly ramp to 0.7 across the episode
+        alpha = 0.0
+        if self._max_steps > 1:
+            # self._step_count is incremented after the reward call in _step
+            alpha = min(self._step_count / (self._max_steps - 1), 1.0)
+        global_w = 0.3 + 0.4 * alpha   # 0.3 → 0.7
+        local_w  = 1.0 - global_w
+
         # ------------------------------------------------------------------ #
-        # 1) Global / local improvements
+        # 1) Global / local improvements (robust denominators)
         rel_g = (err_g_before - err_g_after) / (self._err0 + self._eps)
-        rel_l = (err_l_before - err_l_after) / (err_l_before + self._eps)
-        reward = self._global_w * rel_g + self._local_w * rel_l
+
+        # Clamp local denominator to 10 % of episode‑initial error to
+        # keep gradients informative in early timesteps.
+        local_den = max(err_l_before, 0.1 * self._err0)
+        rel_l = (err_l_before - err_l_after) / (local_den + self._eps)
+
+        reward = global_w * rel_g + local_w * rel_l
 
         # ------------------------------------------------------------------ #
         # Common terms
