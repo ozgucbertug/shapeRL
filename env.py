@@ -64,6 +64,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._no_touch_penalty     = no_touch_penalty
         self._eps                  = 1e-6
 
+        # ── INTERNAL WORK BUFFERS (pre‑allocated, no per‑step realloc) ──
+        self._work_diff      = np.empty((self._patch_height, self._patch_width), dtype=np.float32)
+        self._env_norm_buf   = np.empty_like(self._work_diff)
+        self._tgt_norm_buf   = np.empty_like(self._work_diff)
+        self._obs_buf        = np.empty((self._patch_height, self._patch_width, 3), dtype=np.float32)
+
         # ── SPECS ────────────────────────────────────────────────
         # Action spec: [x, y, dz_rel]  all normalised to [0,1]
         self._action_spec = array_spec.BoundedArraySpec(
@@ -109,28 +115,26 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # Utility: build 3‑channel observation and (optionally) visualise it #
     # ------------------------------------------------------------------ #
     def _build_observation(self, diff, h, t):
-        """Return the 3‑channel observation tensor.
+        """Return the 3‑channel observation tensor using pre‑allocated buffers."""
+        # Channel 0  – signed difference, scaled
+        np.multiply(diff, self._inv_scale_d, out=self._work_diff)
+        np.clip(self._work_diff, -1.0, 1.0, out=self._work_diff)
 
-        Parameters
-        ----------
-        diff : np.ndarray
-            Difference map (env - target), same shape as `h`.
-        h : np.ndarray
-            Current environment height map.
-        t : np.ndarray
-            Target height map.
+        # Channel 1  – normalised current height
+        np.subtract(h, h.mean(), out=self._env_norm_buf)
+        self._env_norm_buf *= self._inv_scale_h
+        np.clip(self._env_norm_buf, -1.0, 1.0, out=self._env_norm_buf)
 
-        Returns
-        -------
-        obs : np.ndarray, float32, shape (H, W, 3), range [-1,1]
-        """
-        diff_signed = np.clip(diff * self._inv_scale_d, -1.0, 1.0)
-        env_norm    = np.clip((h - h.mean()) * self._inv_scale_h, -1.0, 1.0)
-        tgt_norm    = np.clip((t - t.mean()) * self._inv_scale_h, -1.0, 1.0)
+        # Channel 2  – normalised target height
+        np.subtract(t, t.mean(), out=self._tgt_norm_buf)
+        self._tgt_norm_buf *= self._inv_scale_h
+        np.clip(self._tgt_norm_buf, -1.0, 1.0, out=self._tgt_norm_buf)
 
-        obs = np.stack([diff_signed, env_norm, tgt_norm], axis=-1).astype(np.float32)
-
-        return obs
+        # Assemble into the shared observation buffer without extra allocations
+        self._obs_buf[..., 0] = self._work_diff
+        self._obs_buf[..., 1] = self._env_norm_buf
+        self._obs_buf[..., 2] = self._tgt_norm_buf
+        return self._obs_buf
 
     # ------------------------------------------------------------------ #
     # Episode initialisation: sample new terrain & target, reset metrics #
