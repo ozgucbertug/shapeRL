@@ -143,7 +143,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         return diff, err
 
     # ---------------------------------------------------- #
-    #  Reward computation – episode‑normalised and shaped  #
+    #  Reward computation – revised & smoothed             #
     # ---------------------------------------------------- #
     def _compute_reward(
         self,
@@ -155,54 +155,70 @@ class SandShapingEnv(py_environment.PyEnvironment):
         touched: bool
     ) -> float:
         """
-        Robust shaped reward for a single press.
+        Smoothed shaped reward for a single press.
 
         Components
         ----------
-        1. Composite reward: weighted sum of global and local improvements:
-           rel_g = (err_g_before - err_g_after) / (self._err0 + eps)
-           rel_l = (err_l_before - err_l_after) / (err_l_before + eps)
-           reward = self._global_w * rel_g + self._local_w * rel_l
-        2. Progress bonus whenever a new best error is achieved (≥1 % better).
-        3. Volume cost when no improvement is made, scaled by removed volume.
-        4. Efficiency bonus: improvement per unit removed volume (global).
-        5. Waste penalty if more material is removed than improvement achieved (global).
-        6. Miss penalty if the tool did not touch the terrain.
-
-        The reward is clipped to [-5, 5] to guard against outliers.
+        1.  Global / local composite (episode‑normalised):
+                rel_g = (err_g_before − err_g_after) / (err₀ + ε)
+                rel_l = (err_l_before − err_l_after) / (err_l_before + ε)
+                reward = w_g · rel_g + w_l · rel_l
+        2.  **Efficiency bonus** – only if the press touched the surface *and*
+            removed a meaningful volume and improved globally:
+                + c_eff · (rel_g / vol_norm)
+        3.  **Volume penalty** – only when no global improvement:
+                − c_vol · vol_norm
+        4.  **Waste penalty** – only when improvement happens but removal
+            overshoots the error reduction:
+                − c_waste · max(vol_norm − rel_g, 0)
+        5.  **Miss penalty** if the tool did not touch the terrain at all.
+        6.  **Adaptive progress bonus** whenever a new best error is achieved:
+                + progress_bonus · clip(err₀ / err_g_after, 1, 10)
+        7.  Final soft clip with tanh to keep gradients while bounding magnitude.
         """
-        # 1) Compute relative improvements (global and local)
+        # ------------------------------------------------------------------ #
+        # 1) Global / local improvements
         rel_g = (err_g_before - err_g_after) / (self._err0 + self._eps)
         rel_l = (err_l_before - err_l_after) / (err_l_before + self._eps)
         reward = self._global_w * rel_g + self._local_w * rel_l
 
-        # 2) Normalised removed volume in [0,1]
+        # ------------------------------------------------------------------ #
+        # Common terms
         vol_norm = removed / (self._max_press_volume + self._eps)
 
-        # 3) Positive shaping: reward efficiency when there *is* global improvement
-        efficiency = rel_g / (vol_norm + self._eps)
-        if rel_g > 0.0:
+        # ------------------------------------------------------------------ #
+        # 2) Efficiency bonus
+        if touched and vol_norm > 1e-3 and rel_g > 0.0:
+            efficiency = rel_g / vol_norm
             reward += self._efficiency_coeff * efficiency
-        # 4) Negative shaping: penalise useless digging
-        else:
+
+        # ------------------------------------------------------------------ #
+        # 3) Volume penalty when no improvement
+        if rel_g <= 0.0:
             reward -= self._volume_penalty_coeff * vol_norm
 
-        # 5) Waste penalty when removed > global improvement achieved
-        waste = max(vol_norm - rel_g, 0.0)
-        reward -= self._waste_penalty_coeff * waste
+        # ------------------------------------------------------------------ #
+        # 4) Waste penalty for overshoot
+        if rel_g > 0.0:
+            waste = max(vol_norm - rel_g, 0.0)
+            reward -= self._waste_penalty_coeff * waste
 
-        # 6) Fixed penalty if the press missed the surface entirely
+        # ------------------------------------------------------------------ #
+        # 5) Miss penalty
         if not touched:
             reward -= self._no_touch_penalty
 
-        # 7) Progress bonus on new best error (≥1 % better than previous best)
+        # ------------------------------------------------------------------ #
+        # 6) Adaptive progress bonus on new best error
         if err_g_after < (self._best_err - 0.01 * self._err0):
-            reward += self._progress_bonus
+            progress_scale = np.clip(self._err0 / (err_g_after + self._eps), 1.0, 10.0)
+            reward += self._progress_bonus * progress_scale
             self._best_err = err_g_after
 
-        # Safety‑clip
-        reward = float(np.clip(reward, -5.0, 5.0))
-        return reward
+        # ------------------------------------------------------------------ #
+        # 7) Soft clip
+        reward = 5.0 * np.tanh(reward / 5.0)
+        return float(reward)
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
