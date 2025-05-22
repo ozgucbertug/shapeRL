@@ -3,6 +3,37 @@ from numpy.random import default_rng
 import numba
 from functools import lru_cache
 
+# --------------------------------------------------------------------
+#  Cached Perlin coordinate grids to avoid repeated meshgrid creation
+# --------------------------------------------------------------------
+_PERLIN_GRID_CACHE: dict[tuple[tuple[int, int], tuple[int, int]], tuple[np.ndarray, ...]] = {}
+
+def _get_perlin_grid(shape: tuple[int, int], res: tuple[int, int]):
+    """
+    Return cached (xi, yi, xf, yf, u, v) arrays for a given (shape, res)
+    pair.  Arrays are float32 / int32 and live for the life of the process.
+    """
+    key = (shape, res)
+    if key in _PERLIN_GRID_CACHE:
+        return _PERLIN_GRID_CACHE[key]
+
+    height, width = shape
+    res_x, res_y  = res
+
+    xs = np.linspace(0, res_x, width,  endpoint=False, dtype=np.float32)
+    ys = np.linspace(res_y, 0, height, endpoint=False, dtype=np.float32)
+    xv, yv = np.meshgrid(xs, ys)
+
+    xi = np.floor(xv).astype(np.int32)
+    yi = np.floor(yv).astype(np.int32)
+    xf = xv - xi
+    yf = yv - yi
+    u  = fade(xf)
+    v  = fade(yf)
+
+    _PERLIN_GRID_CACHE[key] = (xi, yi, xf, yf, u, v)
+    return _PERLIN_GRID_CACHE[key]
+
 @lru_cache(maxsize=32)
 def _get_perlin_gradients(res_0, res_1, seed):
     rng = default_rng(seed)
@@ -29,19 +60,11 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     res_0 = int(res[0])
     res_1 = int(res[1])
 
-    xs = np.linspace(0, res_0, width, endpoint=False)
-    ys = np.linspace(res_1, 0, height, endpoint=False)
-    xv, yv = np.meshgrid(xs, ys)
-    xi = np.floor(xv).astype(int)
-    yi = np.floor(yv).astype(int)
-    xf = xv - xi
-    yf = yv - yi
-    u = fade(xf)
-    v = fade(yf)
-    if seed is not None:
-        gradients = _get_perlin_gradients(res_0, res_1, seed)
-    else:
-        gradients = _get_perlin_gradients(res_0, res_1, seed)
+    # Re‑use cached coordinate grids
+    xi, yi, xf, yf, u, v = _get_perlin_grid(shape, (res_0, res_1))
+
+    # Gradients: still depend on seed so cannot be cached here
+    gradients = _get_perlin_gradients(res_0, res_1, seed)
 
     def dot_grad(ix, iy, x, y):
         g = gradients[ix % (res_0 + 1), iy % (res_1 + 1)]
@@ -55,6 +78,7 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     x1 = n00 * (1 - u) + n10 * u
     x2 = n01 * (1 - u) + n11 * u
     noise = x1 * (1 - v) + x2 * v
+
     mn, mx = noise.min(), noise.max()
     denom = mx - mn
     if denom > 0:
@@ -64,6 +88,43 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     noise = noise * np.float32(amplitude)
     return noise.astype(np.float32)
 
+
+
+# JIT‑accelerated absolute‑pose press that computes centre height and
+# effective depth inside the kernel, then delegates to `_jit_apply_press`.
+@numba.njit(cache=True, nogil=True)
+def _jit_apply_press_abs(map_arr, press_offset, press_mask,
+                         r, x, y, z_abs, dz_rel, bedrock=0.0):
+    """
+    Variant of the spherical press for absolute tool pose.
+    Returns (removed_volume, touched_flag).
+    """
+    height, width = map_arr.shape
+    # Integer centre coordinates (same rounding as Python round())
+    cy = int(y + 0.5)
+    cx = int(x + 0.5)
+    # Clamp so full mask fits
+    if cy < r:
+        cy = r
+    elif cy > height - 1 - r:
+        cy = height - 1 - r
+    if cx < r:
+        cx = r
+    elif cx > width - 1 - r:
+        cx = width - 1 - r
+    h_center = map_arr[cy, cx]
+
+    # Effective penetration depth
+    tip_final = z_abs - dz_rel
+    if tip_final < bedrock:
+        tip_final = bedrock
+    dz_eff = h_center - tip_final
+    if dz_eff <= 1e-6:
+        return 0.0, False  # nothing touched
+
+    removed = _jit_apply_press(map_arr, press_offset, press_mask,
+                               r, x, y, dz_eff, bedrock)
+    return removed, True
 
 # JIT-accelerated spherical press carve for HeightMap
 @numba.njit(cache=True, nogil=True)
@@ -163,23 +224,15 @@ class HeightMap:
         2. Push further down by dz_rel (non‑negative).
         Returns (removed_volume, touched_flag)
         """
-        # Clamp z_abs not to exceed current map max (no effect)
-        # Determine center pixel
-        cy = int(np.clip(round(y), self.tool_radius, self.height - 1 - self.tool_radius))
-        cx = int(np.clip(round(x), self.tool_radius, self.width  - 1 - self.tool_radius))
-        h_center = float(self.map[cy, cx])
-
-        tip_final = max(z_abs - dz_rel, self.bedrock)
-        # If final tip is not below current surface, nothing happens
-        dz_effective = h_center - tip_final
-        if dz_effective <= 1e-6:
-            return 0.0, False
-
-        removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
-                                   self.tool_radius, x, y, dz_effective, self.bedrock)
-        self._sum -= removed
-        self._mean = self._sum / self._size
-        return removed, True
+        # Call fused JIT kernel (computes centre & depth internally)
+        removed, touched = _jit_apply_press_abs(
+            self.map, self._press_offset, self._press_mask,
+            self.tool_radius, x, y, z_abs, dz_rel, self.bedrock
+        )
+        if touched:
+            self._sum -= removed
+            self._mean = self._sum / self._size
+        return removed, touched
 
     def difference(self, other, out=None):
         """
