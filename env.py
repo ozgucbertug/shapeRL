@@ -63,6 +63,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._volume_penalty_coeff = volume_penalty_coeff
         self._no_touch_penalty     = no_touch_penalty
         self._eps                  = 1e-6
+        self._progress_bonus = 0.05  # extra reward when a new best error is reached
+        self._best_err = np.inf      # will be initialised per‑episode in _reset
+
+        # Efficiency–aware volume shaping
+        self._efficiency_coeff     = 0.10   # reward scale for efficient carving
+        self._waste_penalty_coeff  = 0.05   # extra penalty for wasted volume
+        # Maximum volume removable by a single press (for normalisation)
+        self._tool_area = np.pi * (self._tool_radius ** 2)
+        self._max_press_volume = self._tool_area * (0.66 * self._tool_radius)
 
         # ── INTERNAL WORK BUFFERS (pre‑allocated, no per‑step realloc) ──
         self._work_diff      = np.empty((self._patch_height, self._patch_width), dtype=np.float32)
@@ -106,11 +115,39 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ---------------------------------------------------- #
     #  Reward computation – easy to swap for new schemes   #
     # ---------------------------------------------------- #
-    def _compute_reward(self, err_before, err_after):
-        """Return scalar reward for a press action using log‐error improvement."""
-        # Log-space error reduction to maintain strong gradient near convergence
-        r_global = np.log(err_before + self._eps) - np.log(err_after + self._eps)
-        return float(r_global)
+    def _compute_reward(self,
+                        err_before: float,
+                        err_after: float,
+                        removed: float,
+                        touched: bool) -> float:
+        # --- 1) Normalised error improvement --------------------------------
+        rel_improve = (err_before - err_after) / (self._err0 + self._eps)
+        reward = rel_improve
+
+        # --- 2) Progress bonus when new best RMSE is achieved ---------------
+        if err_after < self._best_err - 1e-9:
+            reward += self._progress_bonus
+            self._best_err = err_after
+
+        # --- 3) Efficiency‑aware volume signal ------------------------------
+        # Normalise removed volume to [0,1]
+        vol_norm = removed / (self._max_press_volume + self._eps)
+
+        # Efficiency = improvement per unit volume
+        efficiency = rel_improve / (vol_norm + self._eps)
+
+        # Positive incentive for high efficiency
+        reward += self._efficiency_coeff * efficiency
+
+        # Additional penalty for *wasted* volume (removed more than improvement)
+        waste = max(vol_norm - rel_improve, 0.0)
+        reward -= self._waste_penalty_coeff * waste
+
+        # --- 4) Penalty for presses that did not touch the surface ----------
+        if not touched:
+            reward -= self._no_touch_penalty
+
+        return float(reward)
     
     # ------------------------------------------------------------------ #
     # Utility: build 3‑channel observation and (optionally) visualise it #
@@ -180,6 +217,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Cache initial global RMSE for per‑episode normalisation
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
+        self._best_err = self._err0
 
         return ts.restart(obs)
 
@@ -215,12 +253,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Local RMSE after the press
         diff_after = self._env_map.difference(self._target_map, out=self._work_diff)
         err_after = np.sqrt(np.mean(diff_after**2))
-        reward = self._compute_reward(err_before, err_after)
-
-        # Penalise ineffective or wasteful actions
-        if not touched:
-            reward -= self._no_touch_penalty
-        reward -= self._volume_penalty_coeff * removed
+        reward = self._compute_reward(err_before, err_after, removed, touched)
 
         # ----- early‑termination checks -----
         # 1) success if global RMSE is sufficiently low
