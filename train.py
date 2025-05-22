@@ -156,7 +156,7 @@ class CarveActorNetwork(network.Network):
         mean = self.mean(x)
         logstd = self.logstd(x)
         # Prevent extreme log-std values and enforce minimum scale
-        logstd = tf.clip_by_value(logstd, -5.0, 2.0)
+        logstd = tf.clip_by_value(logstd, -3.0, 1.0)
         std = tf.nn.softplus(logstd) + 1e-3
 
         # Base Gaussian distribution
