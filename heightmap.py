@@ -131,8 +131,8 @@ class HeightMap:
         self._press_offset[self._press_mask] = (
             r - np.sqrt(r*r - self._press_dist2[self._press_mask])
         )
-        # Buffer for per-call intrusion heights to avoid reallocating
-        self._z_int = np.empty_like(self._press_offset)
+        # Pre-allocated work buffer for mean-centred differences (re-used each call)
+        self._diff_buf = np.empty((height, width), dtype=np.float32)
         self.scale = scale
         self.amplitude = amplitude
         self.bedrock_offset = bedrock_offset
@@ -181,24 +181,29 @@ class HeightMap:
         self._mean = self._sum / self._size
         return removed, True
 
-    def difference(self, other):
+    def difference(self, other, out=None):
         """
-        Compute mean-centered difference between this heightmap and another.
-        :param other: Another HeightMap or a 2D array.
-        :return: 2D numpy array of differences.
+        Compute mean‑centered difference between this heightmap and another, re‑using an internal buffer unless an `out` buffer is supplied.
         """
-        # Mean-center self using cached mean
-        h1 = self.map - self._mean
-        # Mean-center other
-        if hasattr(other, 'map') and hasattr(other, '_sum'):
-            h2 = other.map - (other._sum / other._size)
+        if out is None:
+            out = self._diff_buf
+
+        # First term: (self.map - self._mean)
+        np.subtract(self.map, self._mean, out=out)
+
+        # Second term: (other.map - mean_other)
+        if hasattr(other, "map") and hasattr(other, "_sum"):
+            # Another HeightMap instance
+            mean_other = other._sum / other._size
+            np.subtract(out, other.map, out=out)
         else:
-            arr = np.asarray(other)
-            mean2 = float(np.sum(arr)) / arr.size
-            h2 = arr - mean2
-        diff = h1 - h2
-        # diff -= diff.min()
-        return diff
+            arr = np.asarray(other, dtype=np.float32)
+            mean_other = float(np.sum(arr)) / arr.size
+            np.subtract(out, arr, out=out)
+
+        # Add the mean of the second term (effectively: - ( - mean_other ))
+        out += mean_other
+        return out
 
 if __name__ == '__main__':
     test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40, bedrock_offset=10)

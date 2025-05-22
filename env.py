@@ -92,6 +92,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._episode_ended = False
         self._env_map = None
         self._target_map = None
+        self._tgt_mean = 0.0   # cached mean of target map for fast normalisation
 
         self.reset()
 
@@ -120,13 +121,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         np.multiply(diff, self._inv_scale_d, out=self._work_diff)
         np.clip(self._work_diff, -1.0, 1.0, out=self._work_diff)
 
-        # Channel 1  – normalised current height
-        np.subtract(h, h.mean(), out=self._env_norm_buf)
+        # Channel 1  – normalised current height (use running mean from HeightMap)
+        np.subtract(h, self._env_map._mean, out=self._env_norm_buf)
         self._env_norm_buf *= self._inv_scale_h
         np.clip(self._env_norm_buf, -1.0, 1.0, out=self._env_norm_buf)
 
-        # Channel 2  – normalised target height
-        np.subtract(t, t.mean(), out=self._tgt_norm_buf)
+        # Channel 2  – normalised target height (cached per episode)
+        np.subtract(t, self._tgt_mean, out=self._tgt_norm_buf)
         self._tgt_norm_buf *= self._inv_scale_h
         np.clip(self._tgt_norm_buf, -1.0, 1.0, out=self._tgt_norm_buf)
 
@@ -164,12 +165,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                      amplitude=tgt_amplitude,
                                      tool_radius=self._tool_radius,
                                      seed=tgt_seed)
+        # Cache target mean for the episode
+        self._tgt_mean = self._target_map._mean
 
         self._step_count = 0
         self._episode_ended = False
 
         # Compute initial difference and normalize to [-1,1]
-        diff = self._env_map.difference(self._target_map)
+        diff = self._env_map.difference(self._target_map, out=self._work_diff)
         # Build 3-channel observation:
         h = self._env_map.map
         t = self._target_map.map
@@ -203,14 +206,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         dz_rel = dz_norm * (0.66 * self._tool_radius)
 
         # Local RMSE before the press
-        diff_before = self._env_map.difference(self._target_map)
+        diff_before = self._env_map.difference(self._target_map, out=self._work_diff)
         err_before = np.sqrt(np.mean(diff_before**2))
 
         # Apply press and measure removed volume
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Local RMSE after the press
-        diff_after = self._env_map.difference(self._target_map)
+        diff_after = self._env_map.difference(self._target_map, out=self._work_diff)
         err_after = np.sqrt(np.mean(diff_after**2))
         reward = self._compute_reward(err_before, err_after)
 
