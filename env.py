@@ -141,24 +141,24 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if err_before - err_after > 0.01 * err_before:
             reward += self._progress_bonus
 
-        # --- 3) Volume‑based shaping ---------------------------------------
-        # Normalised removed volume in [0,1]
-        vol_norm = removed / (self._max_press_volume + self._eps)
-        # Base linear penalty
-        reward -= self._volume_penalty_coeff * vol_norm
+        # # --- 3) Volume‑based shaping ---------------------------------------
+        # # Normalised removed volume in [0,1]
+        # vol_norm = removed / (self._max_press_volume + self._eps)
+        # if rel_improve < 0.0:
+        #     reward -= self._volume_penalty_coeff * vol_norm
 
-        # --- 4) Efficiency term: improvement per unit volume ---------------
-        efficiency = rel_improve / (vol_norm + self._eps)
-        reward += self._efficiency_coeff * efficiency
+        # # --- 4) Efficiency term: improvement per unit volume ---------------
+        # efficiency = rel_improve / (vol_norm + self._eps)
+        # reward += self._efficiency_coeff * efficiency
 
-        # --- 5) Waste penalty ----------------------------------------------
-        # If more volume removed than improvement achieved, penalise the excess
-        waste = max(vol_norm - rel_improve, 0.0)
-        reward -= self._waste_penalty_coeff * waste
+        # # --- 5) Waste penalty ----------------------------------------------
+        # # If more volume removed than improvement achieved, penalise the excess
+        # waste = max(vol_norm - rel_improve, 0.0)
+        # reward -= self._waste_penalty_coeff * waste
 
-        # --- 6) Miss penalty ------------------------------------------------
-        if not touched:
-            reward -= self._no_touch_penalty
+        # # --- 6) Miss penalty ------------------------------------------------
+        # if not touched:
+        #     reward -= self._no_touch_penalty
 
         # --- Final safety‑clip ---------------------------------------------
         reward = float(np.clip(reward, -1.0, 1.0))
