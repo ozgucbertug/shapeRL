@@ -174,15 +174,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
                 + progress_bonus · clip(err₀ / err_g_after, 1, 10)
         7.  Final soft clip with tanh to keep gradients while bounding magnitude.
         """
-        # Dynamic curriculum on the global/local mixture:
-        # start with global_w = 0.3, linearly ramp to 0.7 across the episode
-        alpha = 0.0
-        if self._max_steps > 1:
-            # self._step_count is incremented after the reward call in _step
-            alpha = min(self._step_count / (self._max_steps - 1), 1.0)
-        global_w = 0.3 + 0.4 * alpha   # 0.3 → 0.7
-        local_w  = 1.0 - global_w
-
+        global_w = 0.5
         # ------------------------------------------------------------------ #
         # 1) Global / local improvements (robust denominators)
         rel_g = (err_g_before - err_g_after) / (self._err0 + self._eps)
@@ -192,42 +184,42 @@ class SandShapingEnv(py_environment.PyEnvironment):
         local_den = max(err_l_before, 0.1 * self._err0)
         rel_l = (err_l_before - err_l_after) / (local_den + self._eps)
 
-        reward = global_w * rel_g + local_w * rel_l
+        reward = global_w * rel_g + (1-global_w) * rel_l
 
-        # ------------------------------------------------------------------ #
-        # Common terms
-        vol_norm = removed / (self._max_press_volume + self._eps)
+        # # ------------------------------------------------------------------ #
+        # # Common terms
+        # vol_norm = removed / (self._max_press_volume + self._eps)
 
-        # ------------------------------------------------------------------ #
-        # 2) Efficiency bonus
-        if touched and vol_norm > 1e-3 and rel_g > 0.0:
-            efficiency = rel_g / vol_norm
-            reward += self._efficiency_coeff * efficiency
+        # # ------------------------------------------------------------------ #
+        # # 2) Efficiency bonus
+        # if touched and vol_norm > 1e-3 and rel_g > 0.0:
+        #     efficiency = rel_g / vol_norm
+        #     reward += self._efficiency_coeff * efficiency
 
-        # ------------------------------------------------------------------ #
-        # 3) Volume penalty when no improvement
-        if rel_g <= 0.0:
-            reward -= self._volume_penalty_coeff * vol_norm
+        # # ------------------------------------------------------------------ #
+        # # 3) Volume penalty when no improvement
+        # if rel_g <= 0.0:
+        #     reward -= self._volume_penalty_coeff * vol_norm
 
-        # ------------------------------------------------------------------ #
-        # 4) Waste penalty for overshoot
-        if rel_g > 0.0:
-            waste = max(vol_norm - rel_g, 0.0)
-            reward -= self._waste_penalty_coeff * waste
+        # # ------------------------------------------------------------------ #
+        # # 4) Waste penalty for overshoot
+        # if rel_g > 0.0:
+        #     waste = max(vol_norm - rel_g, 0.0)
+        #     reward -= self._waste_penalty_coeff * waste
 
-        # ------------------------------------------------------------------ #
-        # 5) Miss penalty
-        if not touched:
-            reward -= self._no_touch_penalty
+        # # ------------------------------------------------------------------ #
+        # # 5) Miss penalty
+        # if not touched:
+        #     reward -= self._no_touch_penalty
 
-        # ------------------------------------------------------------------ #
-        # 6) Adaptive progress bonus on new best error
-        if err_g_after < (self._best_err - 0.01 * self._err0):
-            progress_scale = np.clip(self._err0 / (err_g_after + self._eps), 1.0, 10.0)
-            reward += self._progress_bonus * progress_scale
-            self._best_err = err_g_after
+        # # ------------------------------------------------------------------ #
+        # # 6) Adaptive progress bonus on new best error
+        # if err_g_after < (self._best_err - 0.01 * self._err0):
+        #     progress_scale = np.clip(self._err0 / (err_g_after + self._eps), 1.0, 10.0)
+        #     reward += self._progress_bonus * progress_scale
+        #     self._best_err = err_g_after
 
-        # ------------------------------------------------------------------ #
+        # # ------------------------------------------------------------------ #
         # 7) Soft clip
         reward = 5.0 * np.tanh(reward / 5.0)
         return float(reward)
