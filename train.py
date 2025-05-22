@@ -414,14 +414,14 @@ def compute_eval(env, policy, num_episodes=10):
     return metrics
 
 def train(
-    num_parallel_envs=8,
-    vis_interval=1000,
-    eval_interval=1000,
-    checkpoint_interval=10000,
-    seed=None,
-    batch_size=256,
-    collect_steps_per_iteration=5,
-    num_iterations=200000,
+    num_parallel_envs: int = 4,
+    vis_interval: int = 1000,
+    eval_interval: int = 1000,
+    checkpoint_interval: int = 10000,
+    seed: int | None = None,
+    batch_size: int = 64,
+    collect_steps_per_iteration: int = 4,
+    num_iterations: int = 200000,
     use_heuristic_warmup: bool = False,
     encoder_type: str = 'cnn'
 ):
@@ -429,7 +429,7 @@ def train(
         np.random.seed(seed)
         tf.random.set_seed(seed)
     # Hyperparameters
-    replay_buffer_capacity = 16384
+    replay_buffer_capacity = max(4096, batch_size * 64)
     learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
@@ -631,8 +631,8 @@ def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
     parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for training')
+    parser.add_argument('--collect_steps', type=int, default=8, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
     parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
