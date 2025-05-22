@@ -4,7 +4,7 @@ from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
 from tf_agents.agents.sac import sac_agent
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
-from tf_agents.drivers.dynamic_step_driver import DynamicStepDriver
+from tf_agents.drivers import dynamic_tf_driver
 from tf_agents.drivers.py_driver import PyDriver
 from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.utils.common import function, Checkpointer
@@ -15,8 +15,6 @@ from keras import layers, models
 
 import tensorflow_probability as tfp
 from tf_agents.networks import network
-from tf_agents.specs import tensor_spec
-from tf_agents.trajectories import time_step as ts
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
@@ -529,7 +527,7 @@ def train(
     ).prefetch(tf.data.AUTOTUNE)
     iterator = iter(dataset)
 
-    collect_driver = DynamicStepDriver(
+    collect_driver = dynamic_tf_driver.DynamicTFDriver(
         train_env,
         tf_agent.collect_policy,
         observers=[replay_buffer.add_batch],
