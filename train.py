@@ -178,10 +178,42 @@ class CarveCriticNetwork(network.Network):
         self.concat_fc1 = layers.Dense(128, activation='relu')
         self.concat_fc2 = layers.Dense(64, activation='relu')
         self.q_out = layers.Dense(1)
+        # Gaussian attention parameters
+        self._gauss_sigma = 0.05  # width of Gaussian bump in normalized coords
+        self._grid = None
+
+    def build(self, input_shape):
+        # input_shape: tuple(obs_shape, action_shape)
+        obs_shape, _ = input_shape
+        # obs_shape: (batch, H, W, C)
+        _, H, W, _ = obs_shape
+        # Create normalized coordinate grid [0,1] for x and y
+        ys = tf.linspace(0.0, 1.0, H)
+        xs = tf.linspace(0.0, 1.0, W)
+        grid_y, grid_x = tf.meshgrid(ys, xs, indexing='ij')  # shape [H, W]
+        grid = tf.stack([grid_x, grid_y], axis=-1)          # [H, W, 2]
+        grid = tf.reshape(grid, [1, H, W, 2])                # [1, H, W, 2]
+        self._grid = tf.cast(grid, tf.float32)
+        super().build(input_shape)
+
     def call(self, inputs, step_type=None, network_state=(), training=False):
         obs, actions = inputs
-        obs = tf.cast(obs, tf.float32)
-        x = self.encoder(obs)
+        # Cast observation
+        obs = tf.cast(obs, tf.float32)  # [B, H, W, C]
+        # Gaussian attention map from action (x,y)
+        # Extract normalized x,y from actions
+        xy = actions[..., :2]  # [B, 2]
+        # Reshape to [B, 1, 1, 2]
+        xy = tf.reshape(xy, [-1, 1, 1, 2])
+        # Compute squared distance on grid (broadcasting grid over batch)
+        # self._grid: [1, H, W, 2]
+        dist2 = tf.reduce_sum((self._grid - xy)**2, axis=-1, keepdims=True)  # [B, H, W, 1]
+        gauss = tf.exp(-dist2 / (2 * self._gauss_sigma**2))                   # [B, H, W, 1]
+        # Augment observation with Gaussian bump channel
+        obs_aug = tf.concat([obs, gauss], axis=-1)  # [B, H, W, C+1]
+        # Encode augmented observation
+        x = self.encoder(obs_aug)
+        # Process action latents
         a = self.action_fc(actions)
         x = tf.concat([x, a], axis=-1)
         x = self.concat_fc1(x)
