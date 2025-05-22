@@ -233,6 +233,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Cache initial global RMSE for per‑episode normalisation
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
         self._best_err = self._err0
+        if self.debug:
+            # record initial error for per-episode logging
+            self._initial_err0 = self._err0
 
         return ts.restart(obs)
 
@@ -269,6 +272,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff_after = self._env_map.difference(self._target_map, out=self._work_diff)
         err_after = np.sqrt(np.mean(diff_after**2))
         reward = self._compute_reward(err_before, err_after, removed, touched)
+        if self.debug:
+            # expose per-step debug scalars
+            self._last_removed_norm = removed / (self._max_press_volume + self._eps)
+            self._last_rel_improve = (err_before - err_after) / (err_before + self._eps)
+            self._last_reward = reward
 
         # ----- early‑termination checks -----
         # 1) success if global RMSE is sufficiently low

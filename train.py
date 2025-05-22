@@ -423,7 +423,8 @@ def train(
     collect_steps_per_iteration: int = 4,
     num_iterations: int = 200000,
     use_heuristic_warmup: bool = False,
-    encoder_type: str = 'cnn'
+    encoder_type: str = 'cnn',
+    debug: bool = False
 ):
     if seed is not None:
         np.random.seed(seed)
@@ -437,8 +438,12 @@ def train(
     # Create seeded Python environments for training, evaluation, and visualization
     env_fns = []
     for idx in range(num_parallel_envs):
-        env_fns.append(lambda idx=idx: SandShapingEnv(seed=(seed + idx) if seed is not None else None))
+        # enable debug mode in each Python env
+        env_fns.append(lambda idx=idx: SandShapingEnv(debug=True,
+                                                      seed=(seed + idx) if seed is not None else None))
     train_py_env = ParallelPyEnvironment(env_fns)
+    # expose per-env debug scalars later
+    python_envs = train_py_env._envs  # list of SandShapingEnv instances
     eval_py_env = SandShapingEnv(seed=seed)
     vis_env = SandShapingEnv(seed=(seed + num_parallel_envs) if seed is not None else None)
 
@@ -450,7 +455,7 @@ def train(
     action_spec = train_env.action_spec()
     # Choose encoder architecture
     if encoder_type == 'cnn':
-        actor_conv_params = ((32, 3, 2), (64, 3, 2))
+        actor_conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
         critic_conv_params = actor_conv_params
         actor_preproc = None
         critic_preproc = None
@@ -515,6 +520,27 @@ def train(
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
 
+    from tf_agents.trajectories import trajectory as traj_lib
+
+    def collect_summary(trajectory):
+        # Log the mean reward of the collected trajectories
+        tf.summary.scalar('train/step_reward', tf.reduce_mean(trajectory.reward), step=global_step)
+
+    def action_summary(trajectory):
+        # Log mean action components across the batch
+        actions = trajectory.action
+        tf.summary.scalar('train/action_x_mean',
+                          tf.reduce_mean(actions[..., 0]), step=global_step)
+        tf.summary.scalar('train/action_y_mean',
+                          tf.reduce_mean(actions[..., 1]), step=global_step)
+        tf.summary.scalar('train/action_depth_mean',
+                          tf.reduce_mean(actions[..., 2]), step=global_step)
+
+    def buffer_summary(trajectory):
+        # Log current size of the replay buffer
+        tf.summary.scalar('replay_buffer/size',
+                          replay_buffer.num_frames(), step=global_step)
+
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
         batch_size=num_parallel_envs,
@@ -530,7 +556,12 @@ def train(
     collect_driver = dynamic_step_driver.DynamicStepDriver(
         train_env,
         tf_agent.collect_policy,
-        observers=[replay_buffer.add_batch],
+        observers=[
+            replay_buffer.add_batch,
+            collect_summary,
+            action_summary,
+            buffer_summary
+        ],
         num_steps=collect_steps_per_iteration
     )
 
@@ -589,6 +620,17 @@ def train(
         for step in trange(1, num_iterations + 1, desc='Training'):
             train_info = train_step()
             train_loss = train_info.loss
+            if debug:
+                # log per-step debug scalars to TensorBoard (only in debug single-env mode)
+                step_removed = [env._last_removed_norm for env in python_envs]
+                step_rel     = [env._last_rel_improve for env in python_envs]
+                step_reward  = [env._last_reward for env in python_envs]
+                tf.summary.scalar('train/removed_volume_norm',
+                                  float(np.mean(step_removed)), step=step)
+                tf.summary.scalar('train/rel_improve',
+                                  float(np.mean(step_rel)), step=step)
+                tf.summary.scalar('train/step_reward',
+                                  float(np.mean(step_reward)), step=step)
             if vis_interval > 0 and step % vis_interval == 0:
                 if vis_ts.is_last():
                     vis_ts = vis_env.reset()
@@ -630,15 +672,17 @@ def train(
 def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
+    parser.add_argument('--num_envs', type=int, default=6, help='Number of parallel environments for training')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
+    parser.add_argument('--collect_steps', type=int, default=8, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
+    parser.add_argument('--eval_interval', type=int, default=1000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='fpn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--debug', action='store_true', default=False,
+                        help='Enable debug-mode scalar logging for single-process runs')
 
     args = parser.parse_args()
     
@@ -651,7 +695,8 @@ def main(_argv=None):
           collect_steps_per_iteration=args.collect_steps,
           num_iterations=args.num_iterations,
           use_heuristic_warmup=args.heuristic_warmup,
-          encoder_type=args.encoder)
+          encoder_type=args.encoder,
+          debug=args.debug)
 
 if __name__ == '__main__':
     handle_main(main)
