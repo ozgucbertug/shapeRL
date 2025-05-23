@@ -18,6 +18,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         tool_radius: int = 10,
         max_steps: int = 200,
+        max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         error_threshold: float = 0.05,
         success_bonus: float = 1.0,
@@ -51,7 +52,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
         self._max_steps = max_steps
-
+        self.max_push_mult = max_push_mult
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         self._error_threshold      = error_threshold
         self._success_bonus        = success_bonus
@@ -73,7 +74,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._local_radius = 3 * self._tool_radius   # pixels around press centre
         # Maximum volume removable by a single press (for normalisation)
         self._tool_area = np.pi * (self._tool_radius ** 2)
-        self._max_press_volume = self._tool_area * (0.66 * self._tool_radius)
+        self._max_press_volume = self._tool_area * (self.max_push_mult * self._tool_radius)
 
         # ── INTERNAL WORK BUFFERS (pre‑allocated, no per‑step realloc) ──
         self._work_diff      = np.empty((self._patch_height, self._patch_width), dtype=np.float32)
@@ -319,7 +320,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
         h_center = float(self._env_map.map[cy, cx])
         z_abs = h_center
-        dz_rel = dz_norm * (0.66 * self._tool_radius)
+        dz_rel = dz_norm * (self.max_push_mult * self._tool_radius)
 
         # Global & local RMSE before the press
         diff_before, err_g_before = self._diff_and_rmse()

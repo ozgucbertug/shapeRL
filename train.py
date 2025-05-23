@@ -318,13 +318,14 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
     already present in the observation, so it works with ParallelPyEnvironment.
     """
     def __init__(self, time_step_spec, action_spec,
-                 width, height, tool_radius, amp_max):
+                 width, height, tool_radius, amp_max, max_push_mult=1):
         super().__init__(time_step_spec, action_spec)
         self._w = width
         self._h = height
         self._r = tool_radius
         self._amp_max = amp_max        # same as env._amplitude_range[1]
-        self._inv_depth = 1.0 / (0.66 * tool_radius)   # for dz normalisation
+        self._max_push_mult = max_push_mult
+        self._inv_depth = 1.0 / (self._max_push_mult * tool_radius)   # for dz normalisation
 
     # ----- utility -----------------------------------------------------------
     def _single_action(self, diff_signed):
@@ -351,7 +352,7 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         # Convert back to absolute height units using the true scale
         diff_abs = diff_signed[cy, cx] * self._amp_max
         depth = max(0.0, diff_abs)        # 10 % overshoot
-        depth = min(depth, 0.66 * self._r)      # respect env max depth
+        depth = min(depth, self._max_push_mult * self._r)      # respect env max depth
         dz_norm = depth * self._inv_depth       # scale to [0,1]
         dz_norm = float(np.clip(dz_norm, 0.0, 1.0))
 
