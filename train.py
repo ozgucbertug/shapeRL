@@ -329,9 +329,16 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
     # ----- utility -----------------------------------------------------------
     def _single_action(self, diff_signed):
         """
-        diff_signed: (H,W) array, range [-1,1]  (already clipped)
+        diff_signed: (H,W) array, range [-1,1]  (env−target divided by amp_max)
         """
-        cy, cx = np.unravel_index(np.argmax(diff_signed), diff_signed.shape)
+        # Mask out a border of width self._r so the tool never goes out of bounds
+        diff_mod = diff_signed.copy()
+        r = self._r
+        diff_mod[:r, :] = -np.inf
+        diff_mod[-r:, :] = -np.inf
+        diff_mod[:, :r] = -np.inf
+        diff_mod[:, -r:] = -np.inf
+        cy, cx = np.unravel_index(np.argmax(diff_mod), diff_mod.shape)
 
         # (x,y) → normalised action coords
         x_norm = (cx - self._r) / max(1e-6, (self._w - 2 * self._r))
@@ -340,9 +347,10 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         y_norm = float(np.clip(y_norm, 0.0, 1.0))
 
         # Estimate absolute diff height from signed channel
-        # diff_signed = diff * (2/amp_max)  ⇒  diff ≈ diff_signed * amp_max/2
-        diff_abs = diff_signed[cy, cx] * (self._amp_max * 0.5)
-        depth = max(0.0, diff_abs * 1.1)        # 10 % overshoot
+        # diff_signed = diff / amp_max  ⇒  diff ≈ diff_signed * amp_max
+        # Convert back to absolute height units using the true scale
+        diff_abs = diff_signed[cy, cx] * self._amp_max
+        depth = max(0.0, diff_abs)        # 10 % overshoot
         depth = min(depth, 0.66 * self._r)      # respect env max depth
         dz_norm = depth * self._inv_depth       # scale to [0,1]
         dz_norm = float(np.clip(dz_norm, 0.0, 1.0))
@@ -565,22 +573,40 @@ def train(
         num_steps=collect_steps_per_iteration
     )
 
+    # --- Evaluate heuristic policy performance on raw PyEnvironment ---
+    # Instantiate the heuristic policy once so it is available for both
+    # evaluation and (optionally) warm‑up.
+    heuristic_policy = HeuristicPressPolicy(
+        time_step_spec=train_py_env.time_step_spec(),
+        action_spec=action_spec,
+        width=eval_py_env._width,
+        height=eval_py_env._height,
+        tool_radius=eval_py_env._tool_radius,
+        amp_max=eval_py_env._amplitude_range[1],
+    )
+    deltas = []
+    rels = []
+    for _ in range(10):
+        ts_py = eval_py_env.reset()
+        diff0 = eval_py_env._env_map.difference(eval_py_env._target_map)
+        rmse0 = float(np.sqrt(np.mean(diff0**2)))
+        ts_step = ts_py
+        while not ts_step.is_last():
+            action_step = heuristic_policy.action(ts_step)
+            act = action_step.action
+            ts_step = eval_py_env.step(act)
+        diffF = eval_py_env._env_map.difference(eval_py_env._target_map)
+        rmseF = float(np.sqrt(np.mean(diffF**2)))
+        deltas.append(rmse0 - rmseF)
+        rels.append((rmse0 - rmseF) / (rmse0 + 1e-6))
+    print(f"[Heuristic Eval] ΔRMSE_mean = {np.mean(deltas):.4f}, RelImprove_mean = {100*np.mean(rels):.2f}%")
+
     # Warm-up buffer: heuristic or random
     if use_heuristic_warmup:
         # Python-driver heuristic warm-up on the parallel Python env
-        HEURISTIC_WARMUP_FRAMES = max(batch_size * 10, 5000)
+        HEURISTIC_WARMUP_FRAMES = replay_buffer_capacity
         # Initialize warm-up timestep:
         warmup_ts = train_py_env.reset()
-        # Use a single eval env for shape parameters
-        warmup_env = eval_py_env
-        heuristic_policy = HeuristicPressPolicy(
-            time_step_spec=train_py_env.time_step_spec(),
-            action_spec=action_spec,
-            width=warmup_env._width,
-            height=warmup_env._height,
-            tool_radius=warmup_env._tool_radius,
-            amp_max=warmup_env._amplitude_range[1],
-        )
         heuristic_driver = PyDriver(
             train_py_env,
             heuristic_policy,
