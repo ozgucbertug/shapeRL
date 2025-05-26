@@ -1,26 +1,33 @@
+import os, time, argparse
+import numpy as np
 import tensorflow as tf
-from tf_agents.environments import tf_py_environment
-from tf_agents.networks import actor_distribution_network
-from tf_agents.agents.ddpg.critic_network import CriticNetwork
-from tf_agents.agents.sac import sac_agent
+from tqdm.auto import tqdm, trange
+
+
+# Additional keras imports for encoder architectures
+from keras import layers, models, mixed_precision
+
+# ───── HIGH-PERF SWITCHES ─────────────────────────────────────────────────────
+# mixed_precision.set_global_policy('mixed_float16')        # FP16 everywhere that is safe
+# tf.config.optimizer.set_jit(True)            # XLA just-in-time compilation
+# -----------------------------------------------------------------------------
+
+# TF-Agents / RL imports
+from tf_agents.environments import tf_py_environment, ParallelPyEnvironment
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.drivers import dynamic_step_driver
 from tf_agents.drivers.py_driver import PyDriver
-from tf_agents.policies.policy_saver import PolicySaver
 from tf_agents.utils.common import function, Checkpointer
-from tf_agents.environments import ParallelPyEnvironment
-
-# Additional keras imports for encoder architectures
-from keras import layers, models
-
+from tf_agents.policies.policy_saver import PolicySaver
+from tf_agents.system.system_multiprocessing import handle_main
+from tf_agents.agents.sac import sac_agent
+from tf_agents.networks import actor_distribution_network, network
+from tf_agents.agents.ddpg.critic_network import CriticNetwork
 import tensorflow_probability as tfp
-from tf_agents.networks import network
+
 
 from env import SandShapingEnv
 import matplotlib.pyplot as plt
-import numpy as np
-import argparse
-from tqdm.auto import tqdm, trange
 
 from tf_agents.system.system_multiprocessing import handle_main
 import os
@@ -559,7 +566,8 @@ def train(
         sample_batch_size=batch_size,
         num_steps=2,
         single_deterministic_pass=False
-    ).prefetch(tf.data.AUTOTUNE)
+    ).prefetch(tf.data.AUTOTUNE).apply(tf.data.experimental.prefetch_to_device('/gpu:0'))
+
     iterator = iter(dataset)
 
     collect_driver = dynamic_step_driver.DynamicStepDriver(
@@ -707,7 +715,7 @@ def main(_argv=None):
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--encoder', type=str, default='fpn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debug-mode scalar logging for single-process runs')
 
