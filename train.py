@@ -5,7 +5,9 @@ from tqdm.auto import tqdm, trange
 
 
 # Additional keras imports for encoder architectures
-from keras import layers, models, mixed_precision
+from tensorflow.keras import layers, models
+from tensorflow.keras import mixed_precision
+from tensorflow.keras.optimizers import Adam
 
 # ───── HIGH-PERF SWITCHES ─────────────────────────────────────────────────────
 # mixed_precision.set_global_policy('mixed_float16')        # FP16 everywhere that is safe
@@ -219,9 +221,9 @@ def train(
         action_spec=action_spec,
         actor_network=actor_net,
         critic_network=critic_net,
-        actor_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
-        critic_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
-        alpha_optimizer=tf.keras.optimizers.legacy.Adam(learning_rate, clipnorm=1.0),
+        actor_optimizer=Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=Adam(learning_rate, clipnorm=1.0),
+        alpha_optimizer=Adam(learning_rate, clipnorm=1.0),
         target_update_tau=0.005,
         target_update_period=1,
         td_errors_loss_fn=tf.math.squared_difference,
@@ -398,14 +400,14 @@ def train(
                     f"[Eval @ {step}] ΔRMSE: {metrics['delta_rmse_mean']:.4f}, "
                     f"RelImprove: {metrics['rel_improve_mean']:.2%}, "
                 )
-            if checkpoint_interval > 0 and step % checkpoint_interval == 0:
-                train_checkpointer.save(global_step)
-                tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
+            # if checkpoint_interval > 0 and step % checkpoint_interval == 0:
+            #     train_checkpointer.save(global_step)
+            #     tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
     except KeyboardInterrupt:
         print("Training interrupted at step", step)
 
-    final_path = os.path.join(policy_base, 'final')
-    PolicySaver(tf_agent.policy).save(final_path)
+    # final_path = os.path.join(policy_base, 'final')
+    # PolicySaver(tf_agent.policy).save(final_path)
 
 
 # Main entry point for multiprocessing

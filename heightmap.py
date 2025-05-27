@@ -128,7 +128,7 @@ def _jit_apply_press_abs(map_arr, press_offset, press_mask,
 
 # JIT-accelerated spherical press carve for HeightMap
 @numba.njit(cache=True, nogil=True)
-def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz, bedrock=0):
+def _jit_apply_press(map_arr, press_offset, press_mask, r, x, y, dz, bedrock=0.0):
     """
     JIT-compiled spherical press carve. Modifies map_arr in-place and returns volume removed.
     """

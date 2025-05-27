@@ -107,6 +107,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tgt_mean = 0.0   # cached mean of target map for fast normalisation
 
         self.reset()
+        assert self._env_map is not None, "Environment map not initialized after reset"
+        assert self._target_map is not None, "Target map not initialized after reset"
 
     def action_spec(self):
         return self._action_spec
@@ -135,6 +137,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         """
         Compute and return the current diff map and its global RMSE.
         """
+        assert self._env_map is not None
+        assert self._target_map is not None
         # Re-use pre-allocated buffer for the difference
         diff = self._env_map.difference(self._target_map, out=self._work_diff)
         # Compute global RMSE
@@ -230,6 +234,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ------------------------------------------------------------------ #
     def _build_observation(self, diff, h, t):
         """Return the 3‑channel observation tensor using pre‑allocated buffers."""
+        assert self._env_map is not None
         # Channel 0  – signed difference, scaled
         np.multiply(diff, self._inv_scale_d, out=self._work_diff)
         np.clip(self._work_diff, -1.0, 1.0, out=self._work_diff)
@@ -267,6 +272,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                   seed=env_seed,
                                   bedrock_offset=30)
 
+        assert self._env_map is not None # Ensure _env_map is initialized
         # Sample new target patch
         tgt_scale_x = self._rng.uniform(self._target_scale_range[0], self._target_scale_range[1])
         tgt_scale_y = self._rng.uniform(self._target_scale_range[0], self._target_scale_range[1])
@@ -279,6 +285,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
                                      tool_radius=self._tool_radius,
                                      seed=tgt_seed)
         # Cache target mean for the episode
+        assert self._target_map is not None # Ensure _target_map is initialized
         self._tgt_mean = self._target_map._mean
 
         self._step_count = 0
@@ -304,12 +311,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ------------------------------------------------------------------ #
     # One environment step: execute press, update reward & termination   #
     # ------------------------------------------------------------------ #
-    def _step(self, action):
+    def _step(self, action: np.ndarray):
         if self._episode_ended:
             return self._reset()
 
+        assert self._env_map is not None
+        assert self._target_map is not None
+
         # Parse action
-        x_norm, y_norm, dz_norm = action
+        x_norm: float = action[0]
+        y_norm: float = action[1]
+        dz_norm: float = action[2]
 
         # Map normalised action to world coordinates / absolute tool tip
         x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
@@ -348,6 +360,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if self._terminate_on_success and err_g_after <= self._error_threshold:
             self._episode_ended = True
             reward += self._success_bonus
+            assert self._env_map is not None and self._target_map is not None
             h = self._env_map.map
             t = self._target_map.map
             obs = self._build_observation(diff_after, h, t)
@@ -357,6 +370,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if self._fail_on_breach and np.any((diff_after + self._env_map.map) < 0.0):
             self._episode_ended = True
             reward += self._fail_penalty
+            assert self._env_map is not None and self._target_map is not None
             h = self._env_map.map
             t = self._target_map.map
             obs = self._build_observation(diff_after, h, t)
@@ -364,6 +378,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         self._step_count += 1
 
+        assert self._env_map is not None and self._target_map is not None
         h = self._env_map.map
         t = self._target_map.map
         obs = self._build_observation(diff_after, h, t)
