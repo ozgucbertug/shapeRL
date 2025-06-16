@@ -11,7 +11,7 @@ import numpy as np
 class CoordConv(layers.Layer):
     def __init__(self, filters=32, kernel_size=1, **kwargs):
         super().__init__(**kwargs)
-        self.conv = layers.Conv2D(filters, kernel_size, padding='same', activation='relu')
+        self.conv = layers.SeparableConv2D(filters, kernel_size, padding='same', activation='relu')
         self.coords = None
 
     def build(self, input_shape):
@@ -38,16 +38,16 @@ class FPNBlock(layers.Layer):
         super().__init__(**kwargs)
         self.filters = filters
         self.shortcut = None
-        self.conv1 = layers.Conv2D(filters, 3, padding='same')
-        self.bn1 = layers.LayerNormalization()
-        self.conv2 = layers.Conv2D(filters, 3, padding='same')
-        self.bn2 = layers.LayerNormalization()
+        self.conv1 = layers.SeparableConv2D(filters, 3, padding='same')
+        self.bn1 = layers.BatchNormalization()
+        self.conv2 = layers.SeparableConv2D(filters, 3, padding='same')
+        self.bn2 = layers.BatchNormalization()
         self.relu = layers.Activation('relu')
 
     def build(self, input_shape):
         input_channels = input_shape[-1]
         if input_channels != self.filters:
-            self.shortcut = layers.Conv2D(self.filters, 1, padding='same')
+            self.shortcut = layers.SeparableConv2D(self.filters, 1, padding='same')
         super().build(input_shape)
 
     def call(self, x):
@@ -73,7 +73,7 @@ class FPNEncoder(layers.Layer):
         self.pools = [layers.MaxPool2D() for _ in filters_list]
         # FPN lateral and upsample layers
         fpn_channels = filters_list[-1]
-        self.lateral_convs = [layers.Conv2D(fpn_channels, 1, padding='same') for _ in filters_list]
+        self.lateral_convs = [layers.SeparableConv2D(fpn_channels, 1, padding='same') for _ in filters_list]
         self.upsamples     = [layers.UpSampling2D(size=2) for _ in filters_list[:-1]]
         self.merge_upsamples = [layers.UpSampling2D(size=2**i) for i in range(len(filters_list))]
         self.global_pool = layers.GlobalAveragePooling2D()
@@ -207,35 +207,35 @@ def build_unet_encoder(input_shape, latent_dim=256):
     """
     inputs = layers.Input(shape=input_shape)
     # Down 1
-    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(inputs)
-    c1 = layers.Conv2D(32, 3, padding='same', activation='relu')(c1)
+    c1 = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(inputs)
+    c1 = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(c1)
     p1 = layers.MaxPool2D()(c1)
     # Down 2
-    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(p1)
-    c2 = layers.Conv2D(64, 3, padding='same', activation='relu')(c2)
+    c2 = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(p1)
+    c2 = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(c2)
     p2 = layers.MaxPool2D()(c2)
     # Down 3
-    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(p2)
-    c3 = layers.Conv2D(128, 3, padding='same', activation='relu')(c3)
+    c3 = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(p2)
+    c3 = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(c3)
     p3 = layers.MaxPool2D()(c3)
     # Bottleneck
-    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(p3)
-    b  = layers.Conv2D(128, 3, padding='same', activation='relu')(b)
+    b  = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(p3)
+    b  = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(b)
     # Up 1
     u1 = layers.UpSampling2D()(b)
     u1 = layers.Concatenate()([u1, c3])
-    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(u1)
-    c4 = layers.Conv2D(128, 3, padding='same', activation='relu')(c4)
+    c4 = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(u1)
+    c4 = layers.SeparableConv2D(128, 3, padding='same', activation='relu')(c4)
     # Up 2
     u2 = layers.UpSampling2D()(c4)
     u2 = layers.Concatenate()([u2, c2])
-    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(u2)
-    c5 = layers.Conv2D(64, 3, padding='same', activation='relu')(c5)
+    c5 = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(u2)
+    c5 = layers.SeparableConv2D(64, 3, padding='same', activation='relu')(c5)
     # Up 3
     u3 = layers.UpSampling2D()(c5)
     u3 = layers.Concatenate()([u3, c1])
-    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(u3)
-    c6 = layers.Conv2D(32, 3, padding='same', activation='relu')(c6)
+    c6 = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(u3)
+    c6 = layers.SeparableConv2D(32, 3, padding='same', activation='relu')(c6)
     pooled = layers.GlobalAveragePooling2D()(c6)
     latent = layers.Dense(latent_dim, activation='relu')(pooled)
     return models.Model(inputs, latent, name='unet_encoder')
