@@ -7,7 +7,7 @@ from tqdm.auto import tqdm, trange
 # Additional keras imports for encoder architectures
 from tensorflow.keras import layers, models
 from tensorflow.keras import mixed_precision
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 
 # ───── HIGH-PERF SWITCHES ─────────────────────────────────────────────────────
 # mixed_precision.set_global_policy('mixed_float16')        # FP16 everywhere that is safe
@@ -155,7 +155,7 @@ def train(
         np.random.seed(seed)
         tf.random.set_seed(seed)
     # Hyperparameters
-    replay_buffer_capacity = max(4096, batch_size * 64)
+    replay_buffer_capacity = max(4096*4, batch_size * 64)
     learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
@@ -237,7 +237,10 @@ def train(
     policy_base    = 'policies'
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(policy_base, exist_ok=True)
-    policy_saver = PolicySaver(tf_agent.policy)
+    if checkpoint_interval > 0:
+        policy_saver = PolicySaver(tf_agent.policy, batch_size=batch_size)
+    else:
+        policy_saver = None
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
@@ -359,7 +362,7 @@ def train(
         return tf_agent.train(experience)
 
     try:
-        for step in trange(1, num_iterations + 1, desc='Training'):
+        for step in trange(1, num_iterations + 1, desc='Training', dynamic_ncols=True):
             train_info = train_step()
             train_loss = train_info.loss
             if debug:
@@ -414,15 +417,15 @@ def train(
 def main(_argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_iterations', type=int, default=200000, help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=6, help='Number of parallel environments for training')
+    parser.add_argument('--num_envs', type=int, default=4, help='Number of parallel environments for training')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=8, help='Number of steps to collect per iteration')
+    parser.add_argument('--collect_steps', type=int, default=4, help='Number of steps to collect per iteration')
     parser.add_argument('--checkpoint_interval', type=int, default=0, help='Steps between checkpoint saves')
     parser.add_argument('--eval_interval', type=int, default=5000, help='Steps between evaluation')
     parser.add_argument('--vis_interval', type=int, default=0, help='Visualization interval')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True, help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='fpn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
+    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'fpn'], help='Backbone encoder to use for actor/critic')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debug-mode scalar logging for single-process runs')
 

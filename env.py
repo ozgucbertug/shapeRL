@@ -16,7 +16,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         target_scale_range=(2, 4),
         amplitude_range=(10.0, 40.0),
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
-        tool_radius: int = 10,
+        tool_radius: int = 9,
         max_steps: int = 200,
         max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
@@ -157,28 +157,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         removed: float,
         touched: bool
     ) -> float:
-        """
-        Smoothed shaped reward for a single press.
 
-        Components
-        ----------
-        1.  Global / local composite (episode‑normalised):
-                rel_g = (err_g_before − err_g_after) / (err₀ + ε)
-                rel_l = (err_l_before − err_l_after) / (err_l_before + ε)
-                reward = w_g · rel_g + w_l · rel_l
-        2.  **Efficiency bonus** – only if the press touched the surface *and*
-            removed a meaningful volume and improved globally:
-                + c_eff · (rel_g / vol_norm)
-        3.  **Volume penalty** – only when no global improvement:
-                − c_vol · vol_norm
-        4.  **Waste penalty** – only when improvement happens but removal
-            overshoots the error reduction:
-                − c_waste · max(vol_norm − rel_g, 0)
-        5.  **Miss penalty** if the tool did not touch the terrain at all.
-        6.  **Adaptive progress bonus** whenever a new best error is achieved:
-                + progress_bonus · clip(err₀ / err_g_after, 1, 10)
-        7.  Final soft clip with tanh to keep gradients while bounding magnitude.
-        """
         global_w = 0.5
         # ------------------------------------------------------------------ #
         # 1) Global / local improvements (robust denominators)
@@ -264,8 +243,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         scale_y = self._rng.uniform(self._scale_range[0], self._scale_range[1])
         amplitude = self._rng.uniform(self._amplitude_range[0], self._amplitude_range[1])
         env_seed = None if self._seed is None else int(self._rng.integers(0, 2**32))
-        self._env_map = HeightMap(self._width,
-                                  self._height,
+        # Environment and target now share the same playable dimensions
+        self._env_map = HeightMap(self._patch_width,
+                                  self._patch_height,
                                   scale=(scale_x, scale_y),
                                   amplitude=amplitude,
                                   tool_radius=self._tool_radius,
@@ -323,13 +303,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         y_norm: float = action[1]
         dz_norm: float = action[2]
 
-        # Map normalised action to world coordinates / absolute tool tip
-        x = self._tool_radius + x_norm * (self._width  - 2 * self._tool_radius)
-        y = self._tool_radius + y_norm * (self._height - 2 * self._tool_radius)
+        # Map normalized actions directly across the playable patch
+        x = x_norm * (self._patch_width - 1)
+        y = y_norm * (self._patch_height - 1)
 
         # Derive absolute tip height from current surface, then push down by dz_norm
-        cy = int(np.clip(round(y), self._tool_radius, self._height - 1 - self._tool_radius))
-        cx = int(np.clip(round(x), self._tool_radius, self._width  - 1 - self._tool_radius))
+        cy = int(np.clip(round(y), 0, self._patch_height - 1))
+        cx = int(np.clip(round(x), 0, self._patch_width - 1))
         h_center = float(self._env_map.map[cy, cx])
         z_abs = h_center
         dz_rel = dz_norm * (self.max_push_mult * self._tool_radius)
@@ -388,3 +368,73 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return ts.termination(obs, reward)
         else:
             return ts.transition(obs, reward, discount=1.0)
+
+
+# ------------------------- Smoke test -------------------------
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # Create and reset env
+    env = SandShapingEnv(debug=True, seed=42)
+    ts0 = env.reset()
+
+    # Initial maps and observation
+    env0  = env._env_map.map.copy()
+    tgt   = env._target_map.map.copy()
+    diff0 = env0 - tgt
+    obs0  = ts0.observation  # [H,W,3]
+
+    rmse0 = np.sqrt(np.mean(diff0**2))
+    print(f"Initial RMSE: {rmse0:.4f}")
+
+    # Apply some presses
+    actions = [
+        np.array([0.2, 0.8, 0.5], dtype=np.float32),
+        np.array([0.5, 0.5, 1.0], dtype=np.float32),
+        np.array([0.8, 0.2, 0.75], dtype=np.float32),
+    ]
+    for a in actions:
+        ts1 = env.step(a)
+
+    # Post-press maps and observation
+    env1  = env._env_map.map.copy()
+    diff1 = env1 - tgt
+    obs1  = ts1.observation
+
+    rmse1 = np.sqrt(np.mean(diff1**2))
+    print(f"After RMSE: {rmse1:.4f}")
+
+    # Helper to plot before/after/change for a list of arrays
+    def plot_bac(title, before, after, cmap='viridis', is_err=False):
+        if is_err:
+            mm = max(np.abs(before).max(), np.abs(after).max())
+            vrange = (-mm, mm)
+        else:
+            vmin = min(before.min(), after.min())
+            vmax = max(before.max(), after.max())
+            vrange = (vmin, vmax)
+        change = after - before
+
+        fig, axes = plt.subplots(1, 3, figsize=(8, 3), constrained_layout=True)
+        im0 = axes[0].imshow(before, cmap=cmap, vmin=vrange[0], vmax=vrange[1])
+        axes[0].set_title(f"{title} before"); axes[0].axis('off')
+        fig.colorbar(im0, ax=axes[0], fraction=0.046)
+
+        im1 = axes[1].imshow(after, cmap=cmap, vmin=vrange[0], vmax=vrange[1])
+        axes[1].set_title(f"{title} after"); axes[1].axis('off')
+        fig.colorbar(im1, ax=axes[1], fraction=0.046)
+
+        im2 = axes[2].imshow(change, cmap='bwr', vmin=-vrange[1] if is_err else -abs(vrange[1]-vrange[0]), vmax=vrange[1] if is_err else abs(vrange[1]-vrange[0]))
+        axes[2].set_title(f"{title} change"); axes[2].axis('off')
+        fig.colorbar(im2, ax=axes[2], fraction=0.046)
+        plt.show()
+
+    # Plot height, target, error
+    plot_bac("Env height",   env0,  env1,  cmap='viridis')
+    plot_bac("Target height",tgt,   tgt,   cmap='viridis')
+    plot_bac("Error (env−tgt)", diff0, diff1, cmap='bwr', is_err=True)
+
+    # Plot observations channels
+    for idx, ch in enumerate(["Obs diff chan", "Obs env chan", "Obs tgt chan"]):
+        plot_bac(ch, obs0[...,idx], obs1[...,idx], cmap='bwr', is_err=True)

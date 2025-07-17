@@ -47,15 +47,6 @@ def fade(t):
     return 6*t**5 - 15*t**4 + 10*t**3
 
 def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
-    """
-    Generate a 2D Perlin noise heightmap.
-    :param shape: Tuple (height, width) of the output array.
-    :param res: Number of noise periods along each axis as (res_x, res_y).
-    :param amplitude: Amplitude to scale the noise.
-    :param seed: Optional random seed for reproducibility.
-    :return: 2D numpy array of shape `shape`, values in [0, amplitude].
-    """
-    height, width = shape
 
     res_0 = int(res[0])
     res_1 = int(res[1])
@@ -88,19 +79,12 @@ def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
     noise = noise * np.float32(amplitude)
     return noise.astype(np.float32)
 
-
-
-# JIT‑accelerated absolute‑pose press that computes centre height and
-# effective depth inside the kernel, then delegates to `_jit_apply_press`.
 @numba.njit(cache=True, nogil=True)
 def _jit_apply_press_abs(map_arr, press_offset, press_mask,
                          r, x, y, z_abs, dz_rel, bedrock=0.0):
-    """
-    Variant of the spherical press for absolute tool pose.
-    Returns (removed_volume, touched_flag).
-    """
+
     height, width = map_arr.shape
-    # Integer centre coordinates (same rounding as Python round())
+
     cy = int(y + 0.5)
     cx = int(x + 0.5)
     # Clamp so full mask fits
@@ -175,8 +159,20 @@ class HeightMap:
                  tool_radius=5, seed=None, bedrock_offset=0.0):
         """
         Initialize a heightmap with Perlin noise.
-        :param bedrock_offset: Vertical offset to shift the map (does not change clamp floor).
         """
+        # ------------------------------------------------------------------
+        # Pad the internal array so the spherical tool can reach the borders
+        # of the *playable* region without special‑case clamping.
+        # The public width/height parameters refer to the playable area only.
+        # ------------------------------------------------------------------
+        self.playable_width = width
+        self.playable_height = height
+        self.pad = tool_radius
+
+        # Expand the internal grid by the padding on all sides.
+        width = width + 2 * self.pad
+        height = height + 2 * self.pad
+
         self.width = width
         self.height = height
         self.tool_radius = tool_radius
@@ -192,29 +188,43 @@ class HeightMap:
         self._press_offset[self._press_mask] = (
             r - np.sqrt(r*r - self._press_dist2[self._press_mask])
         )
-        # Pre-allocated work buffer for mean-centred differences (re-used each call)
-        self._diff_buf = np.empty((height, width), dtype=np.float32)
+        self._full_map = generate_perlin_noise_2d((height, width), scale, amplitude, seed) + bedrock_offset
+        # Work buffers & stats are defined on the *playable* patch only
+        self._size      = self.playable_height * self.playable_width
+        self._diff_buf  = np.empty((self.playable_height, self.playable_width), dtype=np.float32)
+        self._update_stats()
         self.scale = scale
         self.amplitude = amplitude
         self.bedrock_offset = bedrock_offset
         self.bedrock = 0.0
         
-        self.map = generate_perlin_noise_2d((height, width), scale, amplitude, seed) + bedrock_offset
-        # Running sum and count for fast mean-centered diff
-        self._size = self.width * self.height
-        self._sum = float(np.sum(self.map))
+    # ----------------------- internal helpers -------------------------
+    def _update_stats(self):
+        """Recompute running sum & mean over the playable region only."""
+        playable = self._full_map[self.pad:-self.pad, self.pad:-self.pad]
+        self._sum  = float(np.sum(playable))
         self._mean = self._sum / self._size
+
+    @property
+    def map(self):
+        """
+        Read‑only view (no copy) of the playable sub‑region
+        (shape: playable_height × playable_width).  This is what
+        external code should use for observations and rewards.
+        """
+        return self._full_map[self.pad:-self.pad, self.pad:-self.pad]
 
     def apply_press(self, x, y, dz):
         """
         Simulate a spherical press along world Z and carve the map.
         """
+        # Convert from world‑space (0…playable_dim) to internal padded coords
+        x += self.pad
+        y += self.pad
         # Use JIT-accelerated carve
-        removed = _jit_apply_press(self.map, self._press_offset, self._press_mask,
+        removed = _jit_apply_press(self._full_map, self._press_offset, self._press_mask,
                                   self.tool_radius, x, y, dz, self.bedrock)
-        # Update running sum for fast mean recompute
-        self._sum -= removed
-        self._mean = self._sum / self._size
+        self._update_stats()
         return removed
 
     def apply_press_abs(self, x, y, z_abs, dz_rel):
@@ -224,14 +234,16 @@ class HeightMap:
         2. Push further down by dz_rel (non‑negative).
         Returns (removed_volume, touched_flag)
         """
+        # Convert from world‑space (0…playable_dim) to internal padded coords
+        x += self.pad
+        y += self.pad
         # Call fused JIT kernel (computes centre & depth internally)
         removed, touched = _jit_apply_press_abs(
-            self.map, self._press_offset, self._press_mask,
+            self._full_map, self._press_offset, self._press_mask,
             self.tool_radius, x, y, z_abs, dz_rel, self.bedrock
         )
         if touched:
-            self._sum -= removed
-            self._mean = self._sum / self._size
+            self._update_stats()
         return removed, touched
 
     def difference(self, other, out=None):
@@ -239,25 +251,78 @@ class HeightMap:
         Compute mean‑centered difference between this heightmap and another, re‑using an internal buffer unless an `out` buffer is supplied.
         """
         if out is None:
-            out = self._diff_buf
+            out = np.empty((self.playable_height, self.playable_width), dtype=np.float32)
 
-        # First term: (self.map - self._mean)
-        np.subtract(self.map, self._mean, out=out)
+        # Self term
+        view_self = self.map
+        np.subtract(view_self, self._mean, out=out)
 
-        # Second term: (other.map - mean_other)
-        if hasattr(other, "map") and hasattr(other, "_sum"):
-            # Another HeightMap instance
-            mean_other = other._sum / other._size
-            np.subtract(out, other.map, out=out)
+        # Other term
+        if isinstance(other, HeightMap):
+            view_other = other.map
+            mean_other = other._mean
         else:
-            arr = np.asarray(other, dtype=np.float32)
-            mean_other = float(np.sum(arr)) / arr.size
-            np.subtract(out, arr, out=out)
+            view_other = np.asarray(other, dtype=np.float32)
+            mean_other = float(np.mean(view_other))
 
-        # Add the mean of the second term (effectively: - ( - mean_other ))
-        out += mean_other
+        np.subtract(out, view_other - mean_other, out=out)
         return out
 
-if __name__ == '__main__':
-    test = HeightMap(width=400, height=400, scale=(2,2), amplitude=40, bedrock_offset=10)
-    print(np.min(test.map))
+    def playable_view(self):
+        """
+        Return a view (no copy) of just the playable sub‑region,
+        excluding the padding added for border carving.
+        """
+        return self.map
+
+if __name__ == "__main__":
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import matplotlib.patches as patches
+
+    # Smoke-test for padded grid vs playable patch carve behavior
+    hm = HeightMap(width=64, height=64, scale=(2, 2), bedrock_offset=20, amplitude=10,
+                   tool_radius=5, seed=42)
+
+    # Capture maps before and after a corner press
+    full_before = hm._full_map.copy()
+    patch_before = hm.map.copy()
+    print(f"Full grid shape: {full_before.shape}")
+    print(f"Patch shape: {patch_before.shape}")
+    hm.apply_press(10, 10, dz=5.0)
+    full_after = hm._full_map
+    patch_after = hm.map
+    diff_patch = patch_before - patch_after
+
+    # Plot results
+    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+    titles = [
+        "Full grid before", "Playable patch before", "Full grid after",
+        "Playable patch after", "Difference patch (before−after)", ""
+    ]
+    images = [
+        full_before, patch_before, full_after,
+        patch_after, diff_patch, None
+    ]
+    cmaps = ["turbo", "turbo", "turbo", "turbo", "turbo", None]
+
+    for ax, img, title, cmap in zip(axes.flat, images, titles, cmaps):
+        ax.set_title(title)
+        ax.axis("off")
+        if img is not None:
+            im = ax.imshow(img, cmap=cmap)
+            fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            if title.startswith("Full grid"):
+                # Draw rectangle marking the playable patch
+                rect = patches.Rectangle(
+                    (hm.pad, hm.pad),
+                    hm.playable_width,
+                    hm.playable_height,
+                    linewidth=2,
+                    edgecolor='red',
+                    facecolor='none'
+                )
+                ax.add_patch(rect)
+
+    plt.tight_layout()
+    plt.show()
