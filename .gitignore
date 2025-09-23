@@ -166,3 +166,4 @@ cython_debug/
 /util
 /ckpts
 /policies
+/.vscode
