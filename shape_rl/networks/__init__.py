@@ -1,11 +1,12 @@
+"""Network components for Shape RL."""
+
 import tensorflow as tf
 from keras import layers, models
 from tf_agents.networks import actor_distribution_network, network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
-from tf_agents.policies import py_policy
-from tf_agents.trajectories import policy_step
 import tensorflow_probability as tfp
 import numpy as np
+from shape_rl.policies.heuristic import HeuristicPressPolicy
 
 # ==================== FPN/CoordConv/Custom Actor & Critic ====================
 class CoordConv(layers.Layer):
@@ -240,61 +241,14 @@ def build_unet_encoder(input_shape, latent_dim=256):
     latent = layers.Dense(latent_dim, activation='relu')(pooled)
     return models.Model(inputs, latent, name='unet_encoder')
 
-# ---------- Heuristic Policy --------------------------------------------------
-class HeuristicPressPolicy(py_policy.PyPolicy):
-    """
-    Greedy one‑step policy: press at the (x,y) with maximum positive
-    env‑minus‑target height difference.  Uses only the diff channel that is
-    already present in the observation, so it works with ParallelPyEnvironment.
-    """
-    def __init__(self, time_step_spec, action_spec,
-                 width, height, tool_radius, amp_max, max_push_mult=1):
-        super().__init__(time_step_spec, action_spec)
-        self._w = width
-        self._h = height
-        self._r = tool_radius
-        self._amp_max = amp_max        # same as env._amplitude_range[1]
-        self._max_push_mult = max_push_mult
-        self._inv_depth = 1.0 / (self._max_push_mult * tool_radius)   # for dz normalisation
 
-    # ----- utility -----------------------------------------------------------
-    def _single_action(self, diff_signed):
-        """
-        diff_signed: (H,W) array, range [-1,1]  (env−target divided by amp_max)
-        """
-        # Mask out a border of width self._r so the tool never goes out of bounds
-        diff_mod = diff_signed.copy()
-        r = self._r
-        diff_mod[:r, :] = -np.inf
-        diff_mod[-r:, :] = -np.inf
-        diff_mod[:, :r] = -np.inf
-        diff_mod[:, -r:] = -np.inf
-        cy, cx = np.unravel_index(np.argmax(diff_mod), diff_mod.shape)
-
-        # (x,y) → normalised action coords
-        x_norm = (cx - self._r) / max(1e-6, (self._w - 2 * self._r))
-        y_norm = (cy - self._r) / max(1e-6, (self._h - 2 * self._r))
-        x_norm = float(np.clip(x_norm, 0.0, 1.0))
-        y_norm = float(np.clip(y_norm, 0.0, 1.0))
-
-        # Estimate absolute diff height from signed channel
-        # diff_signed = diff / amp_max  ⇒  diff ≈ diff_signed * amp_max
-        # Convert back to absolute height units using the true scale
-        diff_abs = diff_signed[cy, cx] * self._amp_max
-        depth = max(0.0, diff_abs)        # 10 % overshoot
-        depth = min(depth, self._max_push_mult * self._r)      # respect env max depth
-        dz_norm = depth * self._inv_depth       # scale to [0,1]
-        dz_norm = float(np.clip(dz_norm, 0.0, 1.0))
-
-        return np.array([x_norm, y_norm, dz_norm], dtype=np.float32)
-
-    # ----- PyPolicy overrides -------------------------------------------------
-    def _action(self, time_step, policy_state):
-        obs = time_step.observation           # (B,H,W,3) or (H,W,3)
-        if obs.ndim == 4:                     # batched
-            batch_actions = [self._single_action(obs[i, ..., 0])
-                             for i in range(obs.shape[0])]
-            act = np.stack(batch_actions, axis=0)
-        else:
-            act = self._single_action(obs[..., 0])
-        return policy_step.PolicyStep(act, policy_state, ())
+__all__ = [
+    "CoordConv",
+    "FPNBlock",
+    "FPNEncoder",
+    "SpatialSoftmax",
+    "CarveActorNetwork",
+    "CarveCriticNetwork",
+    "build_unet_encoder",
+    "HeuristicPressPolicy",
+]
