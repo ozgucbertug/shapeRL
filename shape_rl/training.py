@@ -42,7 +42,7 @@ from datetime import datetime
 
 # Import network architectures
 from shape_rl.networks import (
-    CarveActorNetwork, CarveCriticNetwork, build_unet_encoder
+    CarveActorNetwork, CarveCriticNetwork, build_unet_encoder, build_gated_encoder
 )
 
 __all__ = ["train", "main", "run_cli"]
@@ -123,6 +123,18 @@ def train(
         critic_conv_params = None
         actor_preproc = build_unet_encoder(observation_spec.shape)
         critic_preproc = build_unet_encoder(observation_spec.shape)
+        action_passthrough = layers.Lambda(lambda a: a, name='critic_action_passthrough')
+        critic_preprocessing_layers = (critic_preproc, action_passthrough)
+
+        def _concat_inputs(inputs):
+            return tf.concat(inputs, axis=-1)
+
+        critic_preprocessing_combiner = _concat_inputs
+    elif encoder_type == 'gated':
+        actor_conv_params = None
+        critic_conv_params = None
+        actor_preproc = build_gated_encoder(observation_spec.shape)
+        critic_preproc = build_gated_encoder(observation_spec.shape)
         action_passthrough = layers.Lambda(lambda a: a, name='critic_action_passthrough')
         critic_preprocessing_layers = (critic_preproc, action_passthrough)
 
@@ -535,27 +547,16 @@ def train(
                 eval_start = time.perf_counter() if profile_totals is not None else None
                 # Detailed evaluation metrics
                 metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
-                # Log error-focused metrics to TensorBoard
-                tf.summary.scalar('eval/init_rmse_mean', metrics['init_rmse_mean'], step=step)
-                tf.summary.scalar('eval/final_rmse_mean', metrics['final_rmse_mean'], step=step)
-                tf.summary.scalar('eval/rmse_delta_mean', metrics['rmse_delta_mean'], step=step)
-                tf.summary.scalar('eval/rel_improve_mean', metrics['rel_improve_mean'], step=step)
-                tf.summary.scalar('eval/rmse_auc_mean', metrics['rmse_auc_mean'], step=step)
-                tf.summary.scalar('eval/rmse_slope_mean', metrics['rmse_slope_mean'], step=step)
-                tf.summary.scalar('eval/min_rmse_mean', metrics['min_rmse_mean'], step=step)
-                tf.summary.scalar('eval/episode_length_mean', metrics['episode_length_mean'], step=step)
-                tf.summary.scalar('eval/return_mean', metrics['return_mean'], step=step)
-                tf.summary.scalar('eval/success_rate', metrics['success_rate'], step=step)
-                tf.summary.scalar('eval/chamfer_init_mean', metrics['chamfer_init_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_final_mean', metrics['chamfer_final_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_delta_mean', metrics['chamfer_delta_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_auc_mean', metrics['chamfer_auc_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_slope_mean', metrics['chamfer_slope_mean'], step=step)
-                tf.summary.scalar('eval/emd_init_mean', metrics['emd_init_mean'], step=step)
-                tf.summary.scalar('eval/emd_final_mean', metrics['emd_final_mean'], step=step)
-                tf.summary.scalar('eval/emd_delta_mean', metrics['emd_delta_mean'], step=step)
-                tf.summary.scalar('eval/emd_auc_mean', metrics['emd_auc_mean'], step=step)
-                tf.summary.scalar('eval/emd_slope_mean', metrics['emd_slope_mean'], step=step)
+                # Log the requested evaluation cards to TensorBoard
+                tf.summary.scalar('eval/rmse_delta', metrics['rmse_delta_mean'], step=step)
+                tf.summary.scalar('eval/rmse_auc', metrics['rmse_auc_mean'], step=step)
+                tf.summary.scalar('eval/rmse_slope', metrics['rmse_slope_mean'], step=step)
+                tf.summary.scalar('eval/chamfer_delta', metrics['chamfer_delta_mean'], step=step)
+                tf.summary.scalar('eval/chamfer_auc', metrics['chamfer_auc_mean'], step=step)
+                tf.summary.scalar('eval/chamfer_slope', metrics['chamfer_slope_mean'], step=step)
+                tf.summary.scalar('eval/emd_delta', metrics['emd_delta_mean'], step=step)
+                tf.summary.scalar('eval/emd_auc', metrics['emd_auc_mean'], step=step)
+                tf.summary.scalar('eval/emd_slope', metrics['emd_slope_mean'], step=step)
                 # Console output for quick look
                 tqdm.write(
                     f"[Eval @ {step}] RMSE Δ={metrics['rmse_delta_mean']:.4f} "
@@ -659,7 +660,7 @@ def main(_argv=None):
                             help='Random seed for reproducibility')
     parser.add_argument('--heuristic_warmup', action='store_true', default=True,
                             help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'fpn'],
+    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'gated', 'fpn'],
                             help='Backbone encoder to use for actor/critic')
     parser.add_argument('--debug', action='store_true', default=False,
                             help='Enable environment debug bookkeeping and extra TensorBoard logging')

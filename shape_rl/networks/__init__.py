@@ -242,6 +242,32 @@ def build_unet_encoder(input_shape, latent_dim=256):
     return models.Model(inputs, latent, name='unet_encoder')
 
 
+class GatedConvBlock(layers.Layer):
+    def __init__(self, filters, **kwargs):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.conv = layers.SeparableConv2D(2 * filters, 3, padding='same')
+        self.norm = layers.BatchNormalization()
+
+    def call(self, x):
+        y = self.conv(x)
+        y = self.norm(y)
+        a, b = tf.split(y, num_or_size_splits=2, axis=-1)
+        return tf.nn.tanh(a) * tf.nn.sigmoid(b)
+
+
+def build_gated_encoder(input_shape, latent_dim=128):
+    inputs = layers.Input(shape=input_shape)
+    x = inputs
+    for filters in (32, 64, 128):
+        x = GatedConvBlock(filters)(x)
+        x = layers.MaxPool2D()(x)
+    x = GatedConvBlock(128)(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    latent = layers.Dense(latent_dim, activation='relu')(x)
+    return models.Model(inputs, latent, name='gated_encoder')
+
+
 __all__ = [
     "CoordConv",
     "FPNBlock",
@@ -250,5 +276,6 @@ __all__ = [
     "CarveActorNetwork",
     "CarveCriticNetwork",
     "build_unet_encoder",
+    "build_gated_encoder",
     "HeuristicPressPolicy",
 ]

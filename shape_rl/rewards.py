@@ -13,10 +13,18 @@ class RewardParams:
     eps: float
     err0: float
     best_err: float
+    best_chamfer: float
+    best_emd: float
     max_press_volume: float
     no_touch_penalty: float
     volume_penalty_coeff: float
     progress_bonus_scale: float
+    touch_bonus: float
+    idle_penalty: float
+    smooth_grad_coeff: float
+    smooth_cost_coeff: float
+    milestone_threshold: float
+    milestone_bonus: float
 
 
 @dataclass
@@ -32,12 +40,18 @@ class RewardInputs:
     lap_before: float
     lap_after: float
     smooth_strength: float
+    chamfer_before: float
+    chamfer_after: float
+    emd_before: float
+    emd_after: float
 
 
 @dataclass
 class RewardResult:
     reward: float
     best_err: float
+    best_chamfer: float
+    best_emd: float
     diagnostics: Dict[str, float]
 
 
@@ -57,7 +71,7 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
 
     vol_norm = inputs.removed / (params.max_press_volume + params.eps)
     reward = progress_score
-    touch_bonus = 0.05 if inputs.touched else -params.no_touch_penalty
+    touch_bonus = params.touch_bonus if inputs.touched else -params.no_touch_penalty
     reward += touch_bonus
 
     overdig = 0.0
@@ -66,15 +80,15 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
         overdig = max(0.0, vol_norm - expected)
         reward -= params.volume_penalty_coeff * overdig * params.max_press_volume
     else:
-        reward -= 0.02
+        reward -= params.idle_penalty
 
     regression_penalty = 0.1 * max(0.0, -progress_score)
     reward -= regression_penalty
 
     if inputs.smooth_strength > 1e-3 and inputs.touched:
         grad_drop = max(0.0, inputs.grad_before - inputs.grad_after)
-        reward += 0.02 * grad_drop
-        reward -= 0.01 * inputs.smooth_strength
+        reward += params.smooth_grad_coeff * grad_drop
+        reward -= params.smooth_cost_coeff * inputs.smooth_strength
 
     progress_bonus = 0.0
     best_err = params.best_err
@@ -83,6 +97,19 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
         progress_bonus = params.progress_bonus_scale * (1.0 + np.clip(improvement, 0.0, 1.0))
         reward += progress_bonus
         best_err = inputs.err_g_after
+
+    milestone_bonus = 0.0
+    best_chamfer = params.best_chamfer
+    best_emd = params.best_emd
+    chamfer_improvement = (inputs.chamfer_before - inputs.chamfer_after) / max(inputs.chamfer_before, params.eps)
+    emd_improvement = (inputs.emd_before - inputs.emd_after) / max(inputs.emd_before, params.eps)
+    if chamfer_improvement > params.milestone_threshold and inputs.chamfer_after < best_chamfer:
+        milestone_bonus += params.milestone_bonus * chamfer_improvement
+        best_chamfer = inputs.chamfer_after
+    if emd_improvement > params.milestone_threshold and inputs.emd_after < best_emd:
+        milestone_bonus += params.milestone_bonus * emd_improvement
+        best_emd = inputs.emd_after
+    reward += milestone_bonus
 
     reward_clipped = float(np.clip(reward, -3.0, 3.0))
 
@@ -97,11 +124,18 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
         'regression_penalty': float(regression_penalty),
         'progress_score': float(progress_score),
         'progress_bonus': float(progress_bonus),
+        'milestone_bonus': float(milestone_bonus),
         'reward_raw': float(reward),
         'reward_clipped': reward_clipped,
     }
 
-    return RewardResult(reward=reward_clipped, best_err=best_err, diagnostics=diagnostics)
+    return RewardResult(
+        reward=reward_clipped,
+        best_err=best_err,
+        best_chamfer=best_chamfer,
+        best_emd=best_emd,
+        diagnostics=diagnostics,
+    )
 
 
 __all__ = [

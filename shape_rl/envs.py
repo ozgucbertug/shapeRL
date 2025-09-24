@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+
 import numpy as np
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
@@ -10,6 +11,19 @@ from tf_agents.trajectories import time_step as ts
 
 from .terrain import HeightMap
 from .rewards import RewardInputs, RewardParams, compute_press_reward
+
+
+@dataclass(frozen=True)
+class ProceduralConfig:
+    """Configuration controlling target generation heuristics."""
+
+    num_clusters_range: tuple[int, int] = (4, 8)
+    streak_len_range: tuple[int, int] = (2, 5)
+    base_depth_range: tuple[float, float] = (0.4, 1.0)
+    depth_scale_range: tuple[float, float] = (0.6, 1.1)
+    step_scale_range: tuple[float, float] = (0.25, 0.75)
+    jitter_std: float = 0.3
+    sample_stride: int = 4  # used for geometric proxies
 
 
 class SandShapingEnv(py_environment.PyEnvironment):
@@ -34,12 +48,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
         fail_on_breach: bool = True,
         volume_penalty_coeff: float = 3e-4,
         no_touch_penalty: float = 0.05,
+        touch_bonus: float = 0.05,
+        idle_penalty: float = 0.02,
+        smooth_grad_coeff: float = 0.02,
+        smooth_cost_coeff: float = 0.01,
+        milestone_threshold: float = 0.1,
+        milestone_bonus: float = 0.05,
+        action_smoothing_coeff: float = 0.0,
         debug: bool = False,
         seed: int | None = None,
+        procedural_config: ProceduralConfig | None = None,
     ):
         self.debug = debug
         self._seed = seed
         self._rng = np.random.default_rng(seed)
+        self._proc_cfg = procedural_config or ProceduralConfig()
 
         self._width = width
         self._height = height
@@ -66,18 +89,20 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         self._volume_penalty_coeff = volume_penalty_coeff
         self._no_touch_penalty = no_touch_penalty
+        self._touch_bonus = touch_bonus
+        self._idle_penalty = idle_penalty
+        self._smooth_grad_coeff = smooth_grad_coeff
+        self._smooth_cost_coeff = smooth_cost_coeff
+        self._milestone_threshold = milestone_threshold
+        self._milestone_bonus = milestone_bonus
+        self._action_smoothing_coeff = np.clip(action_smoothing_coeff, 0.0, 1.0)
         self._eps = 1e-6
         self._progress_bonus = 0.05
         self._best_err = np.inf
 
-        self._efficiency_coeff = 0.10
-        self._waste_penalty_coeff = 0.05
         self._local_radius = 3 * self._tool_radius
-        self._grad_radius = 2 * self._tool_radius
         self._tool_area = np.pi * (self._tool_radius ** 2)
         self._max_press_volume = self._tool_area * (self.max_push_mult * self._tool_radius)
-        self._grad_weight = 0.2
-        self._lap_weight = 0.1
 
         self._work_diff = np.empty((self._patch_height, self._patch_width), dtype=np.float32)
         self._env_norm_buf = np.empty_like(self._work_diff)
@@ -85,6 +110,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._grad_buf = np.empty_like(self._work_diff)
         self._lap_buf = np.empty_like(self._work_diff)
         self._obs_buf = np.empty((self._patch_height, self._patch_width, 5), dtype=np.float32)
+        self._grad_cache_valid = False
+        self._cached_grad_mag = np.empty_like(self._work_diff)
+        self._cached_lap = np.empty_like(self._work_diff)
+
+        self._best_chamfer_proxy = np.inf
+        self._best_emd_proxy = np.inf
+        self._last_geom_proxy = (np.inf, np.inf)
+        self._prev_action: np.ndarray | None = None
 
         self._action_spec = array_spec.BoundedArraySpec(
             shape=(4,),
@@ -131,7 +164,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
         assert self._target_map is not None
         diff = self._env_map.difference(self._target_map, out=self._work_diff)
         err = float(np.sqrt(np.mean(diff ** 2)))
-        return diff, err
+
+        gy, gx = np.gradient(diff)
+        grad_sq = gy * gy + gx * gx
+        grad_rms = float(np.sqrt(np.mean(grad_sq)))
+        np.sqrt(grad_sq, out=self._cached_grad_mag)
+        self._cached_grad_mag *= self._inv_scale_d
+        np.clip(self._cached_grad_mag, -1.0, 1.0, out=self._cached_grad_mag)
+
+        lap_raw = self._laplacian(diff)
+        lap_rms = float(np.sqrt(np.mean(lap_raw ** 2)))
+        np.multiply(lap_raw, self._inv_scale_d, out=self._cached_lap)
+        np.clip(self._cached_lap, -1.0, 1.0, out=self._cached_lap)
+
+        self._grad_cache_valid = True
+        return diff, err, grad_rms, lap_rms
 
     def _laplacian(self, diff):
         lap = self._lap_buf
@@ -149,20 +196,21 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if max_depth <= 0:
             return carved
 
-        num_clusters = int(self._rng.integers(4, 8))
-        for _ in range(num_clusters):
+        cfg = self._proc_cfg
+        num_clusters = int(self._rng.integers(cfg.num_clusters_range[0], cfg.num_clusters_range[1]))
+        for _ in range(max(1, num_clusters)):
             cx = float(self._rng.uniform(self._tool_radius, self._patch_width - self._tool_radius - 1))
             cy = float(self._rng.uniform(self._tool_radius, self._patch_height - self._tool_radius - 1))
-            base_depth = float(self._rng.uniform(0.4, 1.0) * max_depth)
-            streak_len = int(self._rng.integers(2, 5))
+            base_depth = float(self._rng.uniform(cfg.base_depth_range[0], cfg.base_depth_range[1]) * max_depth)
+            streak_len = int(self._rng.integers(cfg.streak_len_range[0], cfg.streak_len_range[1]))
             angle = float(self._rng.uniform(0.0, 2 * np.pi))
-            step = float(self._rng.uniform(0.25, 0.75) * self._tool_radius)
-            for k in range(streak_len):
-                jitter_x = cx + k * step * np.cos(angle) + self._rng.normal(0.0, 0.3 * self._tool_radius)
-                jitter_y = cy + k * step * np.sin(angle) + self._rng.normal(0.0, 0.3 * self._tool_radius)
+            step = float(self._rng.uniform(cfg.step_scale_range[0], cfg.step_scale_range[1]) * self._tool_radius)
+            for k in range(max(1, streak_len)):
+                jitter_x = cx + k * step * np.cos(angle) + self._rng.normal(0.0, cfg.jitter_std * self._tool_radius)
+                jitter_y = cy + k * step * np.sin(angle) + self._rng.normal(0.0, cfg.jitter_std * self._tool_radius)
                 jitter_x = float(np.clip(jitter_x, 0.0, self._patch_width - 1))
                 jitter_y = float(np.clip(jitter_y, 0.0, self._patch_height - 1))
-                depth_scale = float(self._rng.uniform(0.6, 1.1))
+                depth_scale = float(self._rng.uniform(cfg.depth_scale_range[0], cfg.depth_scale_range[1]))
                 depth = np.clip(base_depth * depth_scale, 0.05, max_depth)
                 map_view = carved.map
                 cy_i = int(np.clip(round(jitter_y), 0, self._patch_height - 1))
@@ -170,6 +218,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
                 z_abs = float(map_view[cy_i, cx_i])
                 carved.apply_press_abs(jitter_x, jitter_y, z_abs, depth)
         return carved
+
+    def _geom_proxies(self, diff: np.ndarray) -> tuple[float, float]:
+        stride = max(1, self._proc_cfg.sample_stride)
+        sample = diff[::stride, ::stride]
+        chamfer_proxy = float(np.mean(np.abs(sample)))
+        cumsum_x = np.abs(np.cumsum(sample, axis=1))
+        cumsum_y = np.abs(np.cumsum(sample, axis=0))
+        emd_proxy = float(np.mean(cumsum_x + cumsum_y))
+        return chamfer_proxy, emd_proxy
 
     def _build_observation(self, diff, h, t):
         assert self._env_map is not None
@@ -184,14 +241,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tgt_norm_buf *= self._inv_scale_h
         np.clip(self._tgt_norm_buf, -1.0, 1.0, out=self._tgt_norm_buf)
 
-        gy, gx = np.gradient(diff)
-        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)
-        np.multiply(self._grad_buf, self._inv_scale_d, out=self._grad_buf)
-        np.clip(self._grad_buf, -1.0, 1.0, out=self._grad_buf)
-
-        lap = self._laplacian(diff)
-        np.multiply(lap, self._inv_scale_d, out=self._lap_buf)
-        np.clip(self._lap_buf, -1.0, 1.0, out=self._lap_buf)
+        if not self._grad_cache_valid:
+            gy, gx = np.gradient(diff)
+            np.sqrt(gy * gy + gx * gx, out=self._cached_grad_mag)
+            self._cached_grad_mag *= self._inv_scale_d
+            np.clip(self._cached_grad_mag, -1.0, 1.0, out=self._cached_grad_mag)
+            lap = self._laplacian(diff)
+            np.multiply(lap, self._inv_scale_d, out=self._cached_lap)
+            np.clip(self._cached_lap, -1.0, 1.0, out=self._cached_lap)
+        np.copyto(self._grad_buf, self._cached_grad_mag)
+        np.copyto(self._lap_buf, self._cached_lap)
+        self._grad_cache_valid = False
 
         self._obs_buf[..., 0] = self._work_diff
         self._obs_buf[..., 1] = self._env_norm_buf
@@ -227,14 +287,27 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         self._err0 = float(np.sqrt(np.mean(diff ** 2))) + self._eps
         self._best_err = self._err0
+        chamfer0, emd0 = self._geom_proxies(diff)
+        self._best_chamfer_proxy = chamfer0
+        self._best_emd_proxy = emd0
+        self._last_geom_proxy = (chamfer0, emd0)
+        self._prev_action = None
         self._reward_params = RewardParams(
             eps=self._eps,
             err0=self._err0,
             best_err=self._best_err,
+            best_chamfer=chamfer0,
+            best_emd=emd0,
             max_press_volume=self._max_press_volume,
             no_touch_penalty=self._no_touch_penalty,
             volume_penalty_coeff=self._volume_penalty_coeff,
             progress_bonus_scale=self._progress_bonus,
+            touch_bonus=self._touch_bonus,
+            idle_penalty=self._idle_penalty,
+            smooth_grad_coeff=self._smooth_grad_coeff,
+            smooth_cost_coeff=self._smooth_cost_coeff,
+            milestone_threshold=self._milestone_threshold,
+            milestone_bonus=self._milestone_bonus,
         )
 
         if self.debug:
@@ -250,6 +323,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         assert self._target_map is not None
         assert self._reward_params is not None
 
+        action = np.asarray(action, dtype=np.float32)
+        if self._action_smoothing_coeff > 0.0 and self._prev_action is not None:
+            action[:3] = (1.0 - self._action_smoothing_coeff) * action[:3] + self._action_smoothing_coeff * self._prev_action[:3]
         x_norm, y_norm, dz_norm, smooth_norm = action
         x = x_norm * (self._patch_width - 1)
         y = y_norm * (self._patch_height - 1)
@@ -260,23 +336,18 @@ class SandShapingEnv(py_environment.PyEnvironment):
         z_abs = h_center
         dz_rel = dz_norm * (self.max_push_mult * self._tool_radius)
 
-        diff_before, err_g_before = self._diff_and_rmse()
+        diff_before, err_g_before, grad_before, lap_before = self._diff_and_rmse()
         err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
-        gy_b, gx_b = np.gradient(diff_before)
-        grad_before = float(np.sqrt(np.mean(gy_b * gy_b + gx_b * gx_b)))
-        lap_before_arr = self._laplacian(diff_before).copy()
-        lap_before = float(np.sqrt(np.mean(lap_before_arr ** 2)))
+        chamfer_before, emd_before = self._last_geom_proxy
 
         removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
         if smooth_norm > 1e-3:
             self._env_map.smooth_patch(x, y, smooth_norm)
 
-        diff_after, err_g_after = self._diff_and_rmse()
+        diff_after, err_g_after, grad_after, lap_after = self._diff_and_rmse()
         err_l_after = self._local_rmse(diff_after, cx, cy, self._local_radius)
-        gy_a, gx_a = np.gradient(diff_after)
-        grad_after = float(np.sqrt(np.mean(gy_a * gy_a + gx_a * gx_a)))
-        lap_after_arr = self._laplacian(diff_after)
-        lap_after = float(np.sqrt(np.mean(lap_after_arr ** 2)))
+        chamfer_after, emd_after = self._geom_proxies(diff_after)
+        self._last_geom_proxy = (chamfer_after, emd_after)
 
         reward_inputs = RewardInputs(
             err_g_before=err_g_before,
@@ -290,11 +361,23 @@ class SandShapingEnv(py_environment.PyEnvironment):
             lap_before=lap_before,
             lap_after=lap_after,
             smooth_strength=float(smooth_norm),
+            chamfer_before=chamfer_before,
+            chamfer_after=chamfer_after,
+            emd_before=emd_before,
+            emd_after=emd_after,
         )
         result = compute_press_reward(self._reward_params, reward_inputs)
         reward = result.reward
         self._best_err = result.best_err
-        self._reward_params = replace(self._reward_params, best_err=self._best_err)
+        self._best_chamfer_proxy = result.best_chamfer
+        self._best_emd_proxy = result.best_emd
+        self._prev_action = action.copy()
+        self._reward_params = replace(
+            self._reward_params,
+            best_err=self._best_err,
+            best_chamfer=self._best_chamfer_proxy,
+            best_emd=self._best_emd_proxy,
+        )
 
         if self.debug:
             self._last_removed_norm = removed / (self._max_press_volume + self._eps)
@@ -336,5 +419,20 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         return ts.transition(obs, reward, discount=1.0)
 
+    # ---- Public helpers ----------------------------------------------------
+    def get_debug_terms(self) -> dict[str, float]:
+        """Return the last reward term breakdown (copy)."""
+        return dict(self._last_reward_terms) if self._last_reward_terms else {}
 
-__all__ = ['SandShapingEnv']
+    def get_env_heightmap(self) -> np.ndarray:
+        if self._env_map is None:
+            raise RuntimeError("Environment map not initialised")
+        return self._env_map.map.copy()
+
+    def get_target_heightmap(self) -> np.ndarray:
+        if self._target_map is None:
+            raise RuntimeError("Target map not initialised")
+        return self._target_map.map.copy()
+
+
+__all__ = ['SandShapingEnv', 'ProceduralConfig']
