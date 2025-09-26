@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Callable, Dict, Any
+from contextlib import suppress
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -80,33 +81,39 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
     for ep in range(num_episodes):
         env = env_factory(ep if base_seed is None else base_seed + ep)
         tf_env = tf_py_environment.TFPyEnvironment(env)
-        time_step = tf_env.reset()
-        diff0 = env._env_map.difference(env._target_map)
-        rmse0 = np.sqrt(np.mean(diff0 ** 2))
-        init_rmses.append(rmse0)
-        env_cloud_init = heightmap_pointcloud(env._env_map)
-        tgt_cloud_init = heightmap_pointcloud(env._target_map)
-        chamfer_init = chamfer_distance(env_cloud_init, tgt_cloud_init)
-        emd_init = earth_movers_distance(env_cloud_init, tgt_cloud_init)
-        chamfers_init.append(chamfer_init)
-        emds_init.append(emd_init)
-        rmse_series = [rmse0]
-        chamfer_series = [chamfer_init]
-        emd_series = [emd_init]
-        reward_series = []
-        while not time_step.is_last():
-            action_step = policy.action(time_step)
-            batched_action = action_step.action
-            time_step = tf_env.step(batched_action)
-            diff = env._env_map.difference(env._target_map)
-            rmse_series.append(np.sqrt(np.mean(diff ** 2)))
-            env_cloud_step = heightmap_pointcloud(env._env_map)
-            chamfer_series.append(chamfer_distance(env_cloud_step, tgt_cloud_init))
-            emd_series.append(earth_movers_distance(env_cloud_step, tgt_cloud_init))
-            try:
-                reward_series.append(float(time_step.reward.numpy()))
-            except Exception:
-                pass
+        try:
+            time_step = tf_env.reset()
+            diff0 = env._env_map.difference(env._target_map)
+            rmse0 = np.sqrt(np.mean(diff0 ** 2))
+            init_rmses.append(rmse0)
+            env_cloud_init = heightmap_pointcloud(env._env_map)
+            tgt_cloud_init = heightmap_pointcloud(env._target_map)
+            chamfer_init = chamfer_distance(env_cloud_init, tgt_cloud_init)
+            emd_init = earth_movers_distance(env_cloud_init, tgt_cloud_init)
+            chamfers_init.append(chamfer_init)
+            emds_init.append(emd_init)
+            rmse_series = [rmse0]
+            chamfer_series = [chamfer_init]
+            emd_series = [emd_init]
+            reward_series = []
+            while not time_step.is_last():
+                action_step = policy.action(time_step)
+                batched_action = action_step.action
+                time_step = tf_env.step(batched_action)
+                diff = env._env_map.difference(env._target_map)
+                rmse_series.append(np.sqrt(np.mean(diff ** 2)))
+                env_cloud_step = heightmap_pointcloud(env._env_map)
+                chamfer_series.append(chamfer_distance(env_cloud_step, tgt_cloud_init))
+                emd_series.append(earth_movers_distance(env_cloud_step, tgt_cloud_init))
+                try:
+                    reward_series.append(float(time_step.reward.numpy()))
+                except Exception:
+                    pass
+        finally:
+            with suppress(Exception):
+                tf_env.close()
+            with suppress(Exception):
+                env.close()
 
         rmse_initial = rmse_series[0]
         rmse_final = rmse_series[-1]

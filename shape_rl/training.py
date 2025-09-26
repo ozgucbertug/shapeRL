@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import time
 from contextlib import suppress
@@ -80,6 +81,16 @@ def train(
     learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
+
+    min_collect_steps = max(1, math.ceil(batch_size / max(1, num_parallel_envs)))
+    if collect_steps_per_iteration < min_collect_steps:
+        prev_collect = collect_steps_per_iteration
+        collect_steps_per_iteration = int(min_collect_steps)
+        tqdm.write(
+            "[Config] collect_steps_per_iteration increased "
+            f"from {prev_collect} to {collect_steps_per_iteration} so each iteration "
+            "collects at least one full training batch."
+        )
 
     # Create seeded Python environments for training, evaluation, and visualization
     env_fns = []
