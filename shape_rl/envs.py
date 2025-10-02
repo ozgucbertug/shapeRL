@@ -55,6 +55,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         milestone_threshold: float = 0.1,
         milestone_bonus: float = 0.05,
         action_smoothing_coeff: float = 0.0,
+        depth_push_coeff: float = 0.1,
         debug: bool = False,
         seed: int | None = None,
         procedural_config: ProceduralConfig | None = None,
@@ -96,6 +97,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._milestone_threshold = milestone_threshold
         self._milestone_bonus = milestone_bonus
         self._action_smoothing_coeff = np.clip(action_smoothing_coeff, 0.0, 1.0)
+        self._depth_push_coeff = float(depth_push_coeff)
         self._eps = 1e-6
         self._progress_bonus = 0.05
         self._best_err = np.inf
@@ -308,6 +310,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             smooth_cost_coeff=self._smooth_cost_coeff,
             milestone_threshold=self._milestone_threshold,
             milestone_bonus=self._milestone_bonus,
+            depth_push_coeff=self._depth_push_coeff,
         )
 
         if self.debug:

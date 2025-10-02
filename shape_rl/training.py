@@ -30,7 +30,7 @@ import tensorflow_probability as tfp
 
 
 from shape_rl.envs import SandShapingEnv
-from shape_rl.metrics import compute_eval, heightmap_pointcloud, chamfer_distance, earth_movers_distance
+from shape_rl.metrics import compute_eval, wasserstein_distance_2d
 from shape_rl.policies import HeuristicPressPolicy
 from datetime import datetime
 
@@ -216,8 +216,6 @@ def train(
     )
 
     # --- Evaluate heuristic policy performance on raw PyEnvironment ---
-    # Instantiate the heuristic policy once so it is available for both
-    # evaluation and (optionally) warm‑up.
     heuristic_policy = HeuristicPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
@@ -228,20 +226,18 @@ def train(
     )
     rmse_init_vals: list[float] = []
     rmse_final_vals: list[float] = []
-    chamfer_init_vals: list[float] = []
-    chamfer_final_vals: list[float] = []
-    emd_init_vals: list[float] = []
-    emd_final_vals: list[float] = []
+    mae_init_vals: list[float] = []
+    mae_final_vals: list[float] = []
+    w2_init_vals: list[float] = []
+    w2_final_vals: list[float] = []
     deltas = []
     rels = []
     for _ in range(10):
         ts_py = eval_py_env.reset()
         diff0 = eval_py_env._env_map.difference(eval_py_env._target_map)
         rmse0 = float(np.sqrt(np.mean(diff0**2)))
-        env_cloud_init = heightmap_pointcloud(eval_py_env._env_map)
-        tgt_cloud = heightmap_pointcloud(eval_py_env._target_map)
-        chamfer0 = chamfer_distance(env_cloud_init, tgt_cloud)
-        emd0 = earth_movers_distance(env_cloud_init, tgt_cloud)
+        mae0 = float(np.mean(np.abs(diff0)))
+        w20 = wasserstein_distance_2d(eval_py_env._env_map, eval_py_env._target_map)
 
         ts_step = ts_py
         while not ts_step.is_last():
@@ -251,34 +247,33 @@ def train(
 
         diffF = eval_py_env._env_map.difference(eval_py_env._target_map)
         rmseF = float(np.sqrt(np.mean(diffF**2)))
-        env_cloud_final = heightmap_pointcloud(eval_py_env._env_map)
-        chamferF = chamfer_distance(env_cloud_final, tgt_cloud)
-        emdF = earth_movers_distance(env_cloud_final, tgt_cloud)
+        maeF = float(np.mean(np.abs(diffF)))
+        w2F = wasserstein_distance_2d(eval_py_env._env_map, eval_py_env._target_map)
 
         rmse_init_vals.append(rmse0)
         rmse_final_vals.append(rmseF)
-        chamfer_init_vals.append(chamfer0)
-        chamfer_final_vals.append(chamferF)
-        emd_init_vals.append(emd0)
-        emd_final_vals.append(emdF)
+        mae_init_vals.append(mae0)
+        mae_final_vals.append(maeF)
+        w2_init_vals.append(w20)
+        w2_final_vals.append(w2F)
 
         deltas.append(rmse0 - rmseF)
         rels.append((rmse0 - rmseF) / (rmse0 + 1e-6))
 
     rmse_init_mean = float(np.mean(rmse_init_vals))
     rmse_final_mean = float(np.mean(rmse_final_vals))
+    mae_init_mean = float(np.mean(mae_init_vals))
+    mae_final_mean = float(np.mean(mae_final_vals))
+    w2_init_mean = float(np.mean(w2_init_vals))
+    w2_final_mean = float(np.mean(w2_final_vals))
     delta_mean = float(np.mean(deltas))
     rel_mean = float(np.mean(rels))
-    chamfer_init_mean = float(np.mean(chamfer_init_vals))
-    chamfer_final_mean = float(np.mean(chamfer_final_vals))
-    emd_init_mean = float(np.mean(emd_init_vals))
-    emd_final_mean = float(np.mean(emd_final_vals))
 
     tqdm.write(
         f"[Heuristic Eval] RMSE {rmse_init_mean:.4f} -> {rmse_final_mean:.4f} "
         f"(Δ {delta_mean:.4f}, rel {rel_mean:.2%}); "
-        f"Chamfer {chamfer_init_mean:.4f} -> {chamfer_final_mean:.4f}; "
-        f"EMD {emd_init_mean:.4f} -> {emd_final_mean:.4f}"
+        f"MAE {mae_init_mean:.4f} -> {mae_final_mean:.4f}; "
+        f"W2 {w2_init_mean:.4f} -> {w2_final_mean:.4f}"
     )
 
     # Warm-up buffer: heuristic or random
@@ -451,22 +446,25 @@ def train(
             if eval_interval > 0 and step % eval_interval == 0:
                 # Detailed evaluation metrics
                 metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
-                # Log the requested evaluation cards to TensorBoard
+                # Log evaluation scalars
                 tf.summary.scalar('eval/rmse_delta', metrics['rmse_delta_mean'], step=step)
-                tf.summary.scalar('eval/rmse_auc', metrics['rmse_auc_mean'], step=step)
+                tf.summary.scalar('eval/rmse_auc_norm', metrics['rmse_auc_norm_mean'], step=step)
                 tf.summary.scalar('eval/rmse_slope', metrics['rmse_slope_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_delta', metrics['chamfer_delta_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_auc', metrics['chamfer_auc_mean'], step=step)
-                tf.summary.scalar('eval/chamfer_slope', metrics['chamfer_slope_mean'], step=step)
-                tf.summary.scalar('eval/emd_delta', metrics['emd_delta_mean'], step=step)
-                tf.summary.scalar('eval/emd_auc', metrics['emd_auc_mean'], step=step)
-                tf.summary.scalar('eval/emd_slope', metrics['emd_slope_mean'], step=step)
+
+                tf.summary.scalar('eval/mae_delta', metrics['mae_delta_mean'], step=step)
+                tf.summary.scalar('eval/mae_auc_norm', metrics['mae_auc_norm_mean'], step=step)
+                tf.summary.scalar('eval/mae_slope', metrics['mae_slope_mean'], step=step)
+
+                tf.summary.scalar('eval/w2_delta', metrics['w2_delta_mean'], step=step)
+                tf.summary.scalar('eval/w2_auc_norm', metrics['w2_auc_norm_mean'], step=step)
+                tf.summary.scalar('eval/w2_slope', metrics['w2_slope_mean'], step=step)
+
                 # Console output for quick look
                 tqdm.write(
                     f"[Eval @ {step}] RMSE Δ={metrics['rmse_delta_mean']:.4f} "
-                    f"(init {metrics['init_rmse_mean']:.4f} → final {metrics['final_rmse_mean']:.4f}, rel {metrics['rel_improve_mean']:.2%}); "
-                    f"Chamfer Δ={metrics['chamfer_delta_mean']:.4f} (init {metrics['chamfer_init_mean']:.4f} → final {metrics['chamfer_final_mean']:.4f}); "
-                    f"EMD Δ={metrics['emd_delta_mean']:.4f} (init {metrics['emd_init_mean']:.4f} → final {metrics['emd_final_mean']:.4f}); "
+                    f"(init {metrics['init_rmse_mean']:.4f} → final {metrics['final_rmse_mean']:.4f}); "
+                    f"MAE Δ={metrics['mae_delta_mean']:.4f} (init {metrics['init_mae_mean']:.4f} → final {metrics['final_mae_mean']:.4f}); "
+                    f"W2 Δ={metrics['w2_delta_mean']:.4f} (init {metrics['w2_init_mean']:.4f} → final {metrics['w2_final_mean']:.4f}); "
                     f"Success: {metrics['success_rate']:.2%}"
                 )
             if log_interval > 0 and step % log_interval == 0:

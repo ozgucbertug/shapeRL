@@ -25,6 +25,7 @@ class RewardParams:
     smooth_cost_coeff: float
     milestone_threshold: float
     milestone_bonus: float
+    depth_push_coeff: float
 
 
 @dataclass
@@ -74,9 +75,17 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
     touch_bonus = params.touch_bonus if inputs.touched else -params.no_touch_penalty
     reward += touch_bonus
 
+    # Encourage deeper pushes when there's still substantial local error.
+    # local_need ∈ [0,1] scales with remaining local RMSE; the bonus saturates with volume.
+    local_need = np.clip(inputs.err_l_before / max(params.err0, params.eps), 0.0, 1.0)
+    depth_bonus = params.depth_push_coeff * local_need * np.tanh(3.0 * vol_norm)
+    reward += depth_bonus
+
     overdig = 0.0
     if inputs.touched:
-        expected = max(progress_score, 0.0)
+        # Allow larger volumes when local error is high, so the policy isn't punished
+        # for attempting deeper pushes early on.
+        expected = max(progress_score, 0.0) + 0.5 * local_need
         overdig = max(0.0, vol_norm - expected)
         reward -= params.volume_penalty_coeff * overdig * params.max_press_volume
     else:
@@ -120,6 +129,8 @@ def compute_press_reward(params: RewardParams, inputs: RewardInputs) -> RewardRe
         'rel_l': float(rel_l),
         'vol_norm': float(vol_norm),
         'overdig': float(overdig),
+        'depth_bonus': float(depth_bonus),
+        'expected_vol': float(expected) if inputs.touched else 0.0,
         'touch_bonus': float(touch_bonus),
         'regression_penalty': float(regression_penalty),
         'progress_score': float(progress_score),
