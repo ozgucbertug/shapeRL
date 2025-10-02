@@ -16,20 +16,18 @@ class TrainingConfig:
     """Container for training hyperparameters."""
 
     num_iterations: int = 900_000
-    num_envs: int = 4
-    batch_size: int = 32
-    collect_steps: int = 4
-    checkpoint_interval: int = 0
+    num_envs: int = 32
+    batch_size: int = 64
+    collect_steps: int = 2
     eval_interval: int = 5_000
-    vis_interval: int = 0
     seed: Optional[int] = 42
     heuristic_warmup: bool = True
     encoder: str = "cnn"
     debug: bool = False
     env_debug: bool = True
     log_interval: int = 1_000
-    initial_collect_steps: Optional[int] = None
-    profile: bool = False
+    initial_collect_steps: Optional[int] = 2**17
+    replay_capacity_total: Optional[int] = 2**19
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -50,21 +48,19 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
                         help="Batch size for training updates")
     parser.add_argument("--collect_steps", type=int, default=defaults.collect_steps,
                         help="Steps collected per iteration across all environments")
-    parser.add_argument("--checkpoint_interval", type=int, default=defaults.checkpoint_interval,
-                        help="Iterations between checkpoint saves (0 disables checkpoints)")
     parser.add_argument("--eval_interval", type=int, default=defaults.eval_interval,
                         help="Iterations between evaluation runs")
-    parser.add_argument("--vis_interval", type=int, default=defaults.vis_interval,
-                        help="Iterations between visualisations (0 disables plots)")
     parser.add_argument("--seed", type=int, default=defaults.seed,
                         help="Random seed (omit to use library default stochastic behaviour)")
     parser.add_argument("--encoder", type=str, default=defaults.encoder,
-                        choices=["cnn", "unet", "gated", "fpn"],
+                        choices=["cnn", "fpn"],
                         help="Backbone encoder architecture for actor/critic")
     parser.add_argument("--log_interval", type=int, default=defaults.log_interval,
                         help="Iterations between throughput logs")
     parser.add_argument("--initial_collect_steps", type=int, default=defaults.initial_collect_steps,
                         help="Warm-up transitions to gather before training (default auto-computed)")
+    parser.add_argument("--replay_capacity_total", type=int, default=defaults.replay_capacity_total,
+                        help="Total replay capacity (overrides default sizing computed from batch/parallel envs)")
 
     parser.add_argument("--heuristic_warmup", dest="heuristic_warmup", action="store_true",
                         help="Use heuristic policy to warm up the replay buffer")
@@ -78,16 +74,10 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
                         help="Enable env debug mode (passes through to SandShapingEnv)")
     parser.add_argument("--no_env_debug", dest="env_debug", action="store_false",
                         help="Disable env debug mode for faster execution")
-    parser.add_argument("--profile", dest="profile", action="store_true",
-                        help="Enable lightweight profiling")
-    parser.add_argument("--no_profile", dest="profile", action="store_false",
-                        help="Disable profiling")
-
     parser.set_defaults(
         heuristic_warmup=defaults.heuristic_warmup,
         debug=defaults.debug,
         env_debug=defaults.env_debug,
-        profile=defaults.profile,
     )
     return parser
 
@@ -101,10 +91,8 @@ def _config_from_args(argv: Optional[Iterable[str]], defaults: TrainingConfig) -
 def run(config: Optional[TrainingConfig] = None) -> None:
     cfg = config or CONFIG
     _train(
-        vis_interval=cfg.vis_interval,
         eval_interval=cfg.eval_interval,
         num_parallel_envs=cfg.num_envs,
-        checkpoint_interval=cfg.checkpoint_interval,
         seed=cfg.seed,
         batch_size=cfg.batch_size,
         collect_steps_per_iteration=cfg.collect_steps,
@@ -115,7 +103,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         log_interval=cfg.log_interval,
         initial_collect_steps=cfg.initial_collect_steps,
         env_debug=cfg.env_debug,
-        profile=cfg.profile,
+        replay_capacity_total=cfg.replay_capacity_total,
     )
 
 

@@ -8,7 +8,6 @@ import tensorflow as tf
 from tqdm.auto import tqdm, trange
 
 # Additional keras imports for encoder architectures
-from tensorflow.keras import layers, models
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.optimizers.legacy import Adam
 
@@ -22,11 +21,10 @@ from tf_agents.environments import tf_py_environment, ParallelPyEnvironment
 from tf_agents.replay_buffers import tf_uniform_replay_buffer
 from tf_agents.drivers import dynamic_step_driver
 from tf_agents.drivers.py_driver import PyDriver
-from tf_agents.utils.common import function, Checkpointer
-from tf_agents.policies.policy_saver import PolicySaver
+from tf_agents.utils.common import function
 from tf_agents.policies import random_tf_policy
 from tf_agents.agents.sac import sac_agent
-from tf_agents.networks import actor_distribution_network, network
+from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
 import tensorflow_probability as tfp
 
@@ -34,15 +32,10 @@ import tensorflow_probability as tfp
 from shape_rl.envs import SandShapingEnv
 from shape_rl.metrics import compute_eval, heightmap_pointcloud, chamfer_distance, earth_movers_distance
 from shape_rl.policies import HeuristicPressPolicy
-from shape_rl.visualization import visualize
-
-import matplotlib.pyplot as plt
 from datetime import datetime
 
 # Import network architectures
-from shape_rl.networks import (
-    CarveActorNetwork, CarveCriticNetwork, build_unet_encoder, build_gated_encoder
-)
+from shape_rl.networks import CarveActorNetwork, CarveCriticNetwork
 
 __all__ = ["train"]
 
@@ -56,9 +49,7 @@ def _make_env(seed: int | None, debug: bool = False) -> callable:
 
 def train(
     num_parallel_envs: int = 4,
-    vis_interval: int = 1000,
     eval_interval: int = 1000,
-    checkpoint_interval: int = 10000,
     seed: int | None = None,
     batch_size: int = 64,
     collect_steps_per_iteration: int = 4,
@@ -69,13 +60,21 @@ def train(
     log_interval: int = 1000,
     initial_collect_steps: int | None = None,
     env_debug: bool = True,
-    profile: bool = False
+    replay_capacity_total: int | None = None,
 ):
     if seed is not None:
         np.random.seed(seed)
         tf.random.set_seed(seed)
     # Hyperparameters
-    replay_buffer_capacity = max(4096*4, batch_size * 64)
+    env_divisor = max(1, num_parallel_envs)
+    if replay_capacity_total is not None and replay_capacity_total <= 0:
+        raise ValueError("replay_capacity_total must be positive when provided")
+    if replay_capacity_total is not None:
+        target_total_replay = int(replay_capacity_total)
+    else:
+        target_total_replay = max(4096 * 4, batch_size * 64)
+    replay_buffer_capacity = max(1, math.ceil(target_total_replay / env_divisor))
+    total_replay_capacity = replay_buffer_capacity * env_divisor
     learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
@@ -102,11 +101,6 @@ def train(
     eval_seed = seed if seed is not None else None
     eval_py_env = SandShapingEnv(seed=eval_seed, debug=env_debug)
 
-    vis_seed = None
-    if seed is not None:
-        vis_seed = seed + num_parallel_envs
-    vis_env = SandShapingEnv(seed=vis_seed, debug=env_debug)
-
     eval_base_seed = (seed + 1000) if seed is not None else None
 
     def eval_env_factory(s):
@@ -119,68 +113,28 @@ def train(
     # Network architecture
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
-    # Choose encoder architecture
-    critic_preprocessing_layers = None
-    critic_preprocessing_combiner = None
-    if encoder_type == 'cnn':
-        actor_conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
-        critic_conv_params = actor_conv_params
-        actor_preproc = None
-        critic_preproc = None
-    elif encoder_type == 'unet':
-        actor_conv_params = None
-        critic_conv_params = None
-        actor_preproc = build_unet_encoder(observation_spec.shape)
-        critic_preproc = build_unet_encoder(observation_spec.shape)
-        action_passthrough = layers.Lambda(lambda a: a, name='critic_action_passthrough')
-        critic_preprocessing_layers = (critic_preproc, action_passthrough)
-
-        def _concat_inputs(inputs):
-            return tf.concat(inputs, axis=-1)
-
-        critic_preprocessing_combiner = _concat_inputs
-    elif encoder_type == 'gated':
-        actor_conv_params = None
-        critic_conv_params = None
-        actor_preproc = build_gated_encoder(observation_spec.shape)
-        critic_preproc = build_gated_encoder(observation_spec.shape)
-        action_passthrough = layers.Lambda(lambda a: a, name='critic_action_passthrough')
-        critic_preprocessing_layers = (critic_preproc, action_passthrough)
-
-        def _concat_inputs(inputs):
-            return tf.concat(inputs, axis=-1)
-
-        critic_preprocessing_combiner = _concat_inputs
-    elif encoder_type == 'fpn':
-        actor_net = CarveActorNetwork(observation_spec, action_spec)
-        critic_net = CarveCriticNetwork(observation_spec, action_spec)
-    else:
-        raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
     if encoder_type == 'fpn':
-        # networks already set
-        pass
-    else:
+        actor_net = CarveActorNetwork(observation_spec, action_spec)
+        critic_net = CarveCriticNetwork(observation_spec, action_spec)
+    elif encoder_type == 'cnn':
+        conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
         actor_net = actor_distribution_network.ActorDistributionNetwork(
             input_tensor_spec=observation_spec,
             output_tensor_spec=action_spec,
-            preprocessing_layers=actor_preproc,
-            conv_layer_params=actor_conv_params,
-            fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
+            conv_layer_params=conv_params,
+            fc_layer_params=(256, 128),
         )
-        critic_kwargs = dict(
+        critic_net = CriticNetwork(
             input_tensor_spec=(observation_spec, action_spec),
-            observation_conv_layer_params=critic_conv_params,
+            observation_conv_layer_params=conv_params,
             observation_fc_layer_params=None,
             action_fc_layer_params=None,
-            joint_fc_layer_params=(256, 128) if encoder_type == 'cnn' else (128,),
+            joint_fc_layer_params=(256, 128),
             name='critic_network'
         )
-        if critic_preprocessing_layers is not None:
-            critic_kwargs['preprocessing_layers'] = critic_preprocessing_layers
-            critic_kwargs['preprocessing_combiner'] = critic_preprocessing_combiner
-
-        critic_net = CriticNetwork(**critic_kwargs)
+    else:
+        raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tf_agent = sac_agent.SacAgent(
@@ -200,14 +154,6 @@ def train(
     )
     tf_agent.initialize()
 
-    checkpoint_dir = 'ckpts'
-    policy_base    = 'policies'
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    os.makedirs(policy_base, exist_ok=True)
-    if checkpoint_interval > 0:
-        policy_saver = PolicySaver(tf_agent.policy, batch_size=batch_size)
-    else:
-        policy_saver = None
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
@@ -414,17 +360,6 @@ def train(
             f"[Warmup] Reward stats → mean:{mean_reward:.4f} min:{min_reward:.4f} max:{max_reward:.4f}"
         )
 
-    profile_totals = None
-    if profile:
-        profile_totals = {
-            'warmup': warmup_elapsed,
-            'train_step': 0.0,
-            'debug': 0.0,
-            'visualize': 0.0,
-            'eval': 0.0,
-            'logging': 0.0,
-        }
-
     if batch_size % num_parallel_envs != 0:
         tqdm.write(
             f"[Config] batch_size {batch_size} is not divisible by num_parallel_envs {num_parallel_envs}; "
@@ -438,7 +373,8 @@ def train(
         f"collect_steps_per_iteration: {collect_steps_per_iteration}",
         f"initial_collect_steps: {initial_collect_steps}",
         f"warmup: {'heuristic' if use_heuristic_warmup else 'random'}",
-        f"replay_capacity: {replay_buffer_capacity}",
+        f"replay_capacity_total: {total_replay_capacity}",
+        f"target_replay: {target_total_replay}",
         f"env_debug: {env_debug}",
     ]
     config_text = '\n'.join(config_lines)
@@ -449,22 +385,6 @@ def train(
     tqdm.write(f"[Config] {config_text.replace(chr(10), '; ')}")
 
     tqdm.write("[Train] Starting optimisation loop")
-
-    train_checkpointer = Checkpointer(
-        ckpt_dir=checkpoint_dir,
-        max_to_keep=3,
-        agent=tf_agent,
-        policy=tf_agent.policy,
-        replay_buffer=replay_buffer,
-        global_step=global_step
-    )
-    train_checkpointer.initialize_or_restore()
-
-    if vis_interval > 0:
-        fig_vis, axes_vis = plt.subplots(2, 3, figsize=(12, 9))
-        cbars = [None] * 6  # one colorbar placeholder per subplot
-        max_amp = vis_env._amplitude_range[1]
-        vis_ts = vis_env.reset()
 
     collect_step = function(collect_driver.run)
 
@@ -479,14 +399,10 @@ def train(
     try:
         for step in trange(1, num_iterations + 1, desc='Training', dynamic_ncols=True, leave=True):
             current_step = step
-            step_start = time.perf_counter() if profile_totals is not None else None
             collect_step()
             experience, _ = next(iterator)
             train_info = train_step(experience)
-            if profile_totals is not None and step_start is not None:
-                profile_totals['train_step'] += time.perf_counter() - step_start
             train_loss = train_info.loss
-            debug_start = time.perf_counter() if profile_totals is not None else None
             if debug and python_envs:
                 # log per-step debug scalars to TensorBoard (only in debug single-env mode)
                 step_removed = [env._last_removed_norm for env in python_envs if hasattr(env, '_last_removed_norm')]
@@ -532,28 +448,7 @@ def train(
                 for key, values in reward_terms.items():
                     tf.summary.scalar(f'train/reward_terms/{key}',
                                       float(np.mean(values)), step=step)
-            if profile_totals is not None and debug_start is not None:
-                profile_totals['debug'] += time.perf_counter() - debug_start
-
-            if vis_interval > 0 and step % vis_interval == 0:
-                vis_start = time.perf_counter() if profile_totals is not None else None
-                if vis_ts.is_last():
-                    vis_ts = vis_env.reset()
-                action_vis = tf_agent.policy.action(vis_ts).action
-                if hasattr(action_vis, "numpy"): action_vis = action_vis.numpy()
-                vis_ts = vis_env.step(action_vis)
-                visualize(fig_vis, axes_vis, cbars, vis_env, step, max_amp)
-                # Log map images for TensorBoard
-                diff_norm = (axes_vis.flat[0].images[0].get_array() - (-1)) / 2.0
-                tf.summary.image('maps/diff', diff_norm[np.newaxis, ..., np.newaxis], step=step)
-                obs_env = axes_vis.flat[4].images[0].get_array()
-                obs_tgt = axes_vis.flat[5].images[0].get_array()
-                tf.summary.image('maps/env', obs_env[np.newaxis, ..., np.newaxis], step=step)
-                tf.summary.image('maps/target', obs_tgt[np.newaxis, ..., np.newaxis], step=step)
-                if profile_totals is not None and vis_start is not None:
-                    profile_totals['visualize'] += time.perf_counter() - vis_start
             if eval_interval > 0 and step % eval_interval == 0:
-                eval_start = time.perf_counter() if profile_totals is not None else None
                 # Detailed evaluation metrics
                 metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
                 # Log the requested evaluation cards to TensorBoard
@@ -574,8 +469,6 @@ def train(
                     f"EMD Δ={metrics['emd_delta_mean']:.4f} (init {metrics['emd_init_mean']:.4f} → final {metrics['emd_final_mean']:.4f}); "
                     f"Success: {metrics['success_rate']:.2%}"
                 )
-                if profile_totals is not None and eval_start is not None:
-                    profile_totals['eval'] += time.perf_counter() - eval_start
             if log_interval > 0 and step % log_interval == 0:
                 now = time.perf_counter()
                 elapsed = max(now - last_log_time, 1e-6)
@@ -608,7 +501,6 @@ def train(
                     pass
 
                 metrics_str = ' '.join(loss_components)
-                log_start = time.perf_counter() if profile_totals is not None else None
                 tqdm.write(
                     f"[Train @ {step}] it/s={iters_per_sec:.1f} env/s={env_steps_per_sec:.1f} "
                     f"{metrics_str}"
@@ -616,33 +508,13 @@ def train(
 
                 last_log_time = now
                 last_log_step = step
-                if profile_totals is not None and log_start is not None:
-                    profile_totals['logging'] += time.perf_counter() - log_start
-            # if checkpoint_interval > 0 and step % checkpoint_interval == 0:
-            #     train_checkpointer.save(global_step)
-            #     tqdm.write(f"[Checkpoint @ {step}] train_loss = {float(train_loss):.4f}")
     except KeyboardInterrupt:
         tqdm.write(f"[Train] Interrupted at step {current_step}")
     else:
         tqdm.write("[Train] Completed optimisation loop")
     finally:
-        if profile_totals is not None:
-            tqdm.write("[Profile] Timing summary (seconds)")
-            for key, value in profile_totals.items():
-                tqdm.write(f"[Profile] {key}: {value:.2f}")
-            elapsed_total = sum(profile_totals.values())
-            tqdm.write(f"[Profile] Total measured: {elapsed_total:.2f}s")
-
         with suppress(Exception):
             train_py_env.close()
         for env_to_close in (train_env, eval_env):
             with suppress(Exception):
                 env_to_close.close()
-        with suppress(Exception):
-            vis_env.close()
-        if vis_interval > 0:
-            with suppress(Exception):
-                plt.close(fig_vis)
-
-    # final_path = os.path.join(policy_base, 'final')
-    # PolicySaver(tf_agent.policy).save(final_path)
