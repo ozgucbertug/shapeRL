@@ -1,4 +1,3 @@
-import argparse
 import math
 import os
 import time
@@ -38,7 +37,6 @@ from shape_rl.policies import HeuristicPressPolicy
 from shape_rl.visualization import visualize
 
 import matplotlib.pyplot as plt
-from tf_agents.system import system_multiprocessing as tf_mp
 from datetime import datetime
 
 # Import network architectures
@@ -46,7 +44,7 @@ from shape_rl.networks import (
     CarveActorNetwork, CarveCriticNetwork, build_unet_encoder, build_gated_encoder
 )
 
-__all__ = ["train", "main", "run_cli"]
+__all__ = ["train"]
 
 def _make_env(seed: int | None, debug: bool = False) -> callable:
     """Factory returning a thunk that creates a SandShapingEnv."""
@@ -648,59 +646,3 @@ def train(
 
     # final_path = os.path.join(policy_base, 'final')
     # PolicySaver(tf_agent.policy).save(final_path)
-
-
-# Main entry point for multiprocessing
-def main(_argv=None):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--num_iterations', type=int, default=100000,
-                            help='Number of training iterations')
-    parser.add_argument('--num_envs', type=int, default=4,
-                            help='Number of parallel environments for training')
-    parser.add_argument('--batch_size', type=int, default=32,
-                            help='Batch size for training')
-    parser.add_argument('--collect_steps', type=int, default=4,
-                            help='Number of steps to collect per iteration')
-    parser.add_argument('--checkpoint_interval', type=int, default=0,
-                            help='Steps between checkpoint saves')
-    parser.add_argument('--eval_interval', type=int, default=5000,
-                            help='Steps between evaluation')
-    parser.add_argument('--vis_interval', type=int, default=0,
-                            help='Visualization interval')
-    parser.add_argument('--seed', type=int, default=42,
-                            help='Random seed for reproducibility')
-    parser.add_argument('--heuristic_warmup', action='store_true', default=True,
-                            help='Use heuristic policy for warm-up instead of random actions')
-    parser.add_argument('--encoder', type=str, default='cnn', choices=['cnn', 'unet', 'gated', 'fpn'],
-                            help='Backbone encoder to use for actor/critic')
-    parser.add_argument('--debug', action='store_true', default=False,
-                            help='Enable environment debug bookkeeping and extra TensorBoard logging')
-    parser.add_argument('--log_interval', type=int, default=1000,
-                            help='Iterations between console throughput logs')
-    parser.add_argument('--initial_collect_steps', type=int, default=None,
-                            help='Warm-up transitions to gather before training updates')
-    parser.add_argument('--profile', action='store_true', default=False,
-                        help='Enable lightweight profiling of key training stages')
-
-    args = parser.parse_args()
-    
-    train(vis_interval=args.vis_interval,
-          eval_interval=args.eval_interval,
-          num_parallel_envs=args.num_envs,
-          checkpoint_interval=args.checkpoint_interval,
-          seed=args.seed,
-          batch_size=args.batch_size,
-          collect_steps_per_iteration=args.collect_steps,
-          num_iterations=args.num_iterations,
-          use_heuristic_warmup=args.heuristic_warmup,
-          encoder_type=args.encoder,
-          debug=args.debug,
-          log_interval=args.log_interval,
-          initial_collect_steps=args.initial_collect_steps,
-          env_debug=args.debug,
-          profile=args.profile)
-
-
-def run_cli():
-    tf_mp.enable_interactive_mode()
-    main()
