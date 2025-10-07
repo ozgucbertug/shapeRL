@@ -1,4 +1,4 @@
-"""Heuristic policies for the sand shaping task."""
+"""Policy implementations for Shape RL."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
     """Greedy one-step policy based on the diff channel."""
 
     def __init__(self, time_step_spec, action_spec,
-                 width, height, tool_radius, amp_max, max_push_mult=1):
+                 width: int, height: int, tool_radius: int, amp_max: float, max_push_mult: float = 1.0):
         super().__init__(time_step_spec, action_spec)
         self._w = width
         self._h = height
@@ -23,7 +23,7 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         self._diff_scale = self._amp_max * 0.5
         self._depth_gain = 1.05
 
-    def _single_action(self, diff_signed):
+    def _single_action(self, diff_signed: np.ndarray) -> np.ndarray:
         actual = diff_signed.astype(np.float32) * self._diff_scale
         diff_mod = actual.copy()
         r = self._r
@@ -34,7 +34,7 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         diff_mod[diff_mod <= 0.0] = -np.inf
         flat_index = np.argmax(diff_mod)
         if not np.isfinite(diff_mod.flat[flat_index]):
-            return np.array([0.5, 0.5, 0.0, 0.0], dtype=np.float32)
+            return np.array([0.5, 0.5, 0.0], dtype=np.float32)
         cy, cx = np.unravel_index(flat_index, diff_mod.shape)
 
         denom_x = max(1.0, self._w - 1)
@@ -53,13 +53,12 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         depth = float(np.clip(depth, 0.0, self._max_depth))
         dz_norm = float(np.clip(depth * self._inv_depth, 0.0, 1.0))
 
-        return np.array([x_norm, y_norm, dz_norm, 0.0], dtype=np.float32)
+        return np.array([x_norm, y_norm, dz_norm], dtype=np.float32)
 
     def _action(self, time_step, policy_state):
         obs = time_step.observation
         if obs.ndim == 4:
-            batch_actions = [self._single_action(obs[i, ..., 0])
-                             for i in range(obs.shape[0])]
+            batch_actions = [self._single_action(obs[i, ..., 0]) for i in range(obs.shape[0])]
             act = np.stack(batch_actions, axis=0)
         else:
             act = self._single_action(obs[..., 0])
@@ -67,3 +66,4 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
 
 
 __all__ = ["HeuristicPressPolicy"]
+

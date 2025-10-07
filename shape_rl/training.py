@@ -35,7 +35,12 @@ from shape_rl.policies import HeuristicPressPolicy
 from datetime import datetime
 
 # Import network architectures
-from shape_rl.networks import CarveActorNetwork, CarveCriticNetwork
+from shape_rl.networks import (
+    FPNActorNetwork,
+    FPNCriticNetwork,
+    SpatialSoftmaxActorNetwork,
+    SpatialSoftmaxCriticNetwork,
+)
 
 __all__ = ["train"]
 
@@ -51,7 +56,7 @@ def train(
     num_parallel_envs: int = 4,
     eval_interval: int = 1000,
     seed: int | None = None,
-    batch_size: int = 64,
+    batch_size: int = 16,
     collect_steps_per_iteration: int = 4,
     num_iterations: int = 200000,
     use_heuristic_warmup: bool = False,
@@ -115,8 +120,11 @@ def train(
     action_spec = train_env.action_spec()
 
     if encoder_type == 'fpn':
-        actor_net = CarveActorNetwork(observation_spec, action_spec)
-        critic_net = CarveCriticNetwork(observation_spec, action_spec)
+        actor_net = FPNActorNetwork(observation_spec, action_spec)
+        critic_net = FPNCriticNetwork(observation_spec, action_spec)
+    elif encoder_type in ('spatial', 'spatial_softmax'):
+        actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
+        critic_net = SpatialSoftmaxCriticNetwork(observation_spec, action_spec)
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
         actor_net = actor_distribution_network.ActorDistributionNetwork(

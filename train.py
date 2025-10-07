@@ -15,19 +15,19 @@ from shape_rl.training import train as _train
 class TrainingConfig:
     """Container for training hyperparameters."""
 
-    num_iterations: int = 900_000
-    num_envs: int = 32
-    batch_size: int = 64
+    num_iterations: int = 200_000
+    num_envs: int = 4
+    batch_size: int = 8
     collect_steps: int = 2
     eval_interval: int = 5_000
     seed: Optional[int] = 42
     heuristic_warmup: bool = True
-    encoder: str = "cnn"
+    encoder: str = "spatial_softmax"
     debug: bool = False
     env_debug: bool = True
     log_interval: int = 1_000
-    initial_collect_steps: Optional[int] = 2**17
-    replay_capacity_total: Optional[int] = 2**19
+    initial_collect_steps: Optional[int] = 4_096
+    replay_capacity_total: Optional[int] = 16_384
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -53,7 +53,7 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=defaults.seed,
                         help="Random seed (omit to use library default stochastic behaviour)")
     parser.add_argument("--encoder", type=str, default=defaults.encoder,
-                        choices=["cnn", "fpn"],
+                        choices=["cnn", "fpn", "spatial", "spatial_softmax"],
                         help="Backbone encoder architecture for actor/critic")
     parser.add_argument("--log_interval", type=int, default=defaults.log_interval,
                         help="Iterations between throughput logs")
@@ -83,7 +83,13 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
 
 
 def _config_from_args(argv: Optional[Iterable[str]], defaults: TrainingConfig) -> TrainingConfig:
-    args = _parser(defaults).parse_args(argv)
+    if argv is None:
+        args_list = None
+    else:
+        args_list = list(argv)
+        if args_list:
+            args_list = args_list[1:]
+    args = _parser(defaults).parse_args(args_list)
     # argparse produces a namespace convertible to the dataclass fields.
     return replace(defaults, **vars(args))
 
@@ -108,7 +114,8 @@ def run(config: Optional[TrainingConfig] = None) -> None:
 
 
 def run_cli(argv: Optional[Iterable[str]] = None) -> None:
-    tf_mp.enable_interactive_mode()
+    if not tf_mp.multiprocessing_core.initialized():
+        tf_mp.enable_interactive_mode()
     run(_config_from_args(argv, CONFIG))
 
 
@@ -127,4 +134,7 @@ __all__ = [
 
 
 if __name__ == "__main__":
+    # Using tf_mp.handle_main introduces an absl.app run loop that can hang
+    # when the script is launched via `conda run`. We rely on `run_cli` to
+    # initialise TF-Agents multiprocessing instead, so invoke main directly.
     main()
