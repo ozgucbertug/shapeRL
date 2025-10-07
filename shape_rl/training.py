@@ -343,15 +343,11 @@ def train(
             except Exception:
                 pass
 
-    heur_target = int(initial_collect_steps * 0.6) if use_heuristic_warmup else 0
-    if heur_target > 0:
-        warmup_ts = train_py_env.reset()
-        heuristic_steps = collect_steps_per_iteration * num_parallel_envs
-        if python_envs:
-            env0 = python_envs[0]
-            max_steps_env = getattr(env0, '_max_steps', None)
-            if isinstance(max_steps_env, int) and max_steps_env > 0:
-                heuristic_steps = max(heuristic_steps, max_steps_env)
+    # --- Simplified warm-up: collect exactly `initial_collect_steps` transitions ---
+    tqdm.write(f"[Warmup] Starting {'heuristic' if use_heuristic_warmup else 'random'} warm-up for {initial_collect_steps} transitions")
+    warmup_start = time.perf_counter()
+
+    if use_heuristic_warmup:
         observers = [replay_buffer.add_batch]
         if warmup_rewards is not None:
             observers.append(_warmup_observer)
@@ -359,18 +355,15 @@ def train(
             train_py_env,
             heuristic_policy,
             observers=observers,
-            max_steps=heuristic_steps
+            max_steps=collect_steps_per_iteration * num_parallel_envs,
         )
-        while _num_frames() < heur_target:
+        warmup_ts = train_py_env.reset()
+        while _num_frames() < initial_collect_steps:
             warmup_ts, _ = heuristic_driver.run(warmup_ts)
-            warmup_ts = train_py_env.reset()
-        tqdm.write(f"[Warmup] Heuristic warm-up collected {_num_frames()} transitions")
-
-    time_step = train_env.reset()
-    if _num_frames() < initial_collect_steps:
-        tqdm.write("[Warmup] Collecting remaining transitions with random policy")
-    while _num_frames() < initial_collect_steps:
-        time_step, _ = random_driver.run(time_step)
+    else:
+        time_step = train_env.reset()
+        while _num_frames() < initial_collect_steps:
+            time_step, _ = random_driver.run(time_step)
 
     warmup_elapsed = max(time.perf_counter() - warmup_start, 1e-6)
     collected = _num_frames()
