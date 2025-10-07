@@ -67,9 +67,13 @@ def train(
     env_debug: bool = True,
     replay_capacity_total: int | None = None,
 ):
+    tqdm.write("[Init] Starting training setup")
     if seed is not None:
         np.random.seed(seed)
         tf.random.set_seed(seed)
+        tqdm.write(f"[Init] Seeding numpy/tf with base seed {seed}")
+    else:
+        tqdm.write("[Init] No RNG seed provided; using default randomness")
     # Hyperparameters
     env_divisor = max(1, num_parallel_envs)
     if replay_capacity_total is not None and replay_capacity_total <= 0:
@@ -83,6 +87,12 @@ def train(
     learning_rate = 1e-4
     gamma = 0.99
     num_eval_episodes = 5
+    tqdm.write(
+        "[Init] Derived hyperparameters — "
+        f"replay_capacity_per_env={replay_buffer_capacity}, "
+        f"total_replay_capacity={total_replay_capacity}, "
+        f"collect_steps_per_iteration={collect_steps_per_iteration}"
+    )
 
     min_collect_steps = max(1, math.ceil(batch_size / max(1, num_parallel_envs)))
     if collect_steps_per_iteration < min_collect_steps:
@@ -95,15 +105,21 @@ def train(
         )
 
     # Create seeded Python environments for training, evaluation, and visualization
+    tqdm.write(
+        f"[Env] Building {num_parallel_envs} parallel environment factories "
+        f"(env_debug={env_debug})"
+    )
     env_fns = []
     for idx in range(num_parallel_envs):
         env_seed = None if seed is None else seed + idx
         env_fns.append(_make_env(env_seed, debug=env_debug))
 
+    tqdm.write("[Env] Spawning ParallelPyEnvironment instances")
     train_py_env = ParallelPyEnvironment(env_fns, start_serially=True)
     python_envs = getattr(train_py_env, '_envs', None)
 
     eval_seed = seed if seed is not None else None
+    tqdm.write("[Env] Creating evaluation SandShapingEnv")
     eval_py_env = SandShapingEnv(seed=eval_seed, debug=env_debug)
 
     eval_base_seed = (seed + 1000) if seed is not None else None
@@ -112,6 +128,7 @@ def train(
         env_seed = s if s is not None else None
         return SandShapingEnv(seed=env_seed, debug=False)
 
+    tqdm.write("[Env] Wrapping Python environments with TFPyEnvironment")
     train_env = tf_py_environment.TFPyEnvironment(train_py_env)
     eval_env = tf_py_environment.TFPyEnvironment(eval_py_env)
 
@@ -119,6 +136,7 @@ def train(
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
 
+    encoder_label = encoder_type
     if encoder_type == 'fpn':
         actor_net = FPNActorNetwork(observation_spec, action_spec)
         critic_net = FPNCriticNetwork(observation_spec, action_spec)
@@ -141,10 +159,12 @@ def train(
             joint_fc_layer_params=(256, 128),
             name='critic_network'
         )
+        encoder_label = "CNN"
     else:
         raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
+    tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_label}'")
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
@@ -168,6 +188,7 @@ def train(
     logdir = os.path.join(log_root, datetime.now().strftime('%Y%m%d-%H%M%S'))
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
+    tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
 
     def collect_summary(trajectory):
         # Log the mean reward of the collected trajectories
@@ -210,6 +231,7 @@ def train(
             pass
 
     iterator = iter(dataset)
+    tqdm.write("[Buffer] Replay buffer dataset ready; iterator initialised")
 
     collect_driver = dynamic_step_driver.DynamicStepDriver(
         train_env,
@@ -222,8 +244,10 @@ def train(
         ],
         num_steps=collect_steps_per_iteration
     )
+    tqdm.write("[Drivers] Collection driver prepared")
 
     # --- Evaluate heuristic policy performance on raw PyEnvironment ---
+    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baseline")
     heuristic_policy = HeuristicPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
@@ -340,8 +364,11 @@ def train(
         while _num_frames() < heur_target:
             warmup_ts, _ = heuristic_driver.run(warmup_ts)
             warmup_ts = train_py_env.reset()
+        tqdm.write(f"[Warmup] Heuristic warm-up collected {_num_frames()} transitions")
 
     time_step = train_env.reset()
+    if _num_frames() < initial_collect_steps:
+        tqdm.write("[Warmup] Collecting remaining transitions with random policy")
     while _num_frames() < initial_collect_steps:
         time_step, _ = random_driver.run(time_step)
 
@@ -519,6 +546,7 @@ def train(
     else:
         tqdm.write("[Train] Completed optimisation loop")
     finally:
+        tqdm.write("[Cleanup] Closing environments")
         with suppress(Exception):
             train_py_env.close()
         for env_to_close in (train_env, eval_env):
