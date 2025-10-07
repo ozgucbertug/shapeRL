@@ -28,7 +28,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         fail_on_breach: bool = True,
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
         volume_penalty_coeff: float = 3e-4,
-        no_touch_penalty: float = 0.05,
+        no_touch_penalty: float = 0.02,
         # ── MISC / DEBUG ──────────────────────────────────────────
         debug: bool = False,
         seed: int | None = None,
@@ -64,16 +64,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
         self._volume_penalty_coeff = volume_penalty_coeff
-        self._no_touch_penalty     = no_touch_penalty
+        self._step_cost            = float(no_touch_penalty)  # per-action cost to discourage dithering
         self._eps                  = 1e-6
-        self._progress_bonus = 0.05
-        self._best_err = np.inf
-
-        self._waste_penalty_coeff  = 0.05
+        self._global_weight        = 0.7
+        self._local_weight         = 0.3
 
         self._local_radius = 3 * self._tool_radius
-        self._tool_area = np.pi * (self._tool_radius ** 2)
-        self._max_press_volume = self._tool_area * (self.max_push_mult * self._tool_radius)
+        self._max_press_volume = self._compute_max_press_volume()
         self._last_reward_terms: dict[str, float] = {}
 
         # ── INTERNAL WORK BUFFERS ─────────────────────────────────
@@ -83,7 +80,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tgt_norm_buf = np.empty((H, W), dtype=np.float32)
         self._grad_buf     = np.empty((H, W), dtype=np.float32)  # |∇diff|
         self._lap_buf      = np.empty((H, W), dtype=np.float32)  # Δ diff
-        self._obs_buf      = np.empty((H, W, 5), dtype=np.float32)  # [diff, env, tgt, grad, lap]
+        self._obs_buf      = np.empty((H, W, 6), dtype=np.float32)  # [diff, env, tgt, grad, lap, progress]
 
         # ── SPECS ────────────────────────────────────────────────
         self._action_spec = array_spec.BoundedArraySpec(
@@ -94,7 +91,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             name='action'
         )
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(H, W, 5),
+            shape=(H, W, 6),
             dtype=np.float32,
             minimum=-1.0,
             maximum=1.0,
@@ -106,6 +103,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._env_map = None
         self._target_map = None
         self._tgt_mean = 0.0
+        self._current_err_global = np.inf
 
         self.reset()
         assert self._env_map is not None
@@ -116,6 +114,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
     def observation_spec(self):
         return self._observation_spec
+
+    def _compute_max_press_volume(self) -> float:
+        """Maximum excavation volume for a single press (spherical-cap geometry)."""
+        radius = float(self._tool_radius)
+        depth = float(np.clip(self.max_push_mult * radius, 0.0, 2.0 * radius))
+        if depth <= 0.0:
+            return self._eps
+        return float((np.pi * depth * depth * (3.0 * radius - depth)) / 3.0)
 
     # ---------------------------------------------------- #
     #  Local RMSE around (cx, cy) within square radius r   #
@@ -166,10 +172,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
         np.clip(self._lap_buf, -1.0, 1.0, out=self._lap_buf)
 
     # ------------------------------------------------------------------ #
-    # Utility: build 5-channel observation                               #
+    # Utility: build observation tensor                                  #
     # ------------------------------------------------------------------ #
     def _build_observation(self, diff, h, t):
-        """Return the 5-channel observation tensor using pre-allocated buffers."""
+        """Return the observation tensor using pre-allocated buffers."""
         assert self._env_map is not None
 
         # 0: signed diff (scaled)
@@ -195,6 +201,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._obs_buf[..., 2] = self._tgt_norm_buf
         self._obs_buf[..., 3] = self._grad_buf
         self._obs_buf[..., 4] = self._lap_buf
+        err_ratio = 0.0
+        if np.isfinite(self._current_err_global):
+            err_ratio = self._current_err_global / (self._err0 + self._eps)
+        err_ratio = float(np.clip(err_ratio, 0.0, 1.0))
+        progress_plane = 2.0 * err_ratio - 1.0
+        self._obs_buf[..., 5].fill(progress_plane)
         return self._obs_buf
 
     # ------------------------------------------------------------------ #
@@ -233,10 +245,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff = self._env_map.difference(self._target_map, out=self._work_diff)
         h = self._env_map.map
         t = self._target_map.map
-        obs = self._build_observation(diff, h, t)
-
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
-        self._best_err = self._err0
+        self._current_err_global = self._err0
+        obs = self._build_observation(diff, h, t)
         if self.debug:
             self._initial_err0 = self._err0
 
@@ -281,7 +292,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         reward = self._compute_reward(
             err_g_before, err_g_after,
             err_l_before, err_l_after,
-            removed, touched
+            removed
         )
 
         # ----- early-termination checks -----
@@ -289,6 +300,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._episode_ended = True
             reward += self._success_bonus
             h = self._env_map.map; t = self._target_map.map
+            self._current_err_global = err_g_after
             obs = self._build_observation(diff_after, h, t)
             if self.debug:
                 self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
@@ -301,6 +313,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._episode_ended = True
             reward += self._fail_penalty
             h = self._env_map.map; t = self._target_map.map
+            self._current_err_global = err_g_after
             obs = self._build_observation(diff_after, h, t)
             if self.debug:
                 self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
@@ -310,6 +323,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._step_count += 1
 
         h = self._env_map.map; t = self._target_map.map
+        self._current_err_global = err_g_after
         obs = self._build_observation(diff_after, h, t)
 
         # Debug scalars used by training.py if present
@@ -330,7 +344,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return ts.transition(obs, reward, discount=1.0)
 
     # ---------------------------------------------------- #
-    #  Reward (lean blended improvement)                   #
+    #  Reward (potential-based shaping)                    #
     # ---------------------------------------------------- #
     def _compute_reward(
         self,
@@ -339,42 +353,32 @@ class SandShapingEnv(py_environment.PyEnvironment):
         err_l_before: float,
         err_l_after:  float,
         removed: float,
-        touched: bool
     ) -> float:
-        global_w = 0.6
-        rel_g = (err_g_before - err_g_after) / (self._err0 + self._eps)
-        local_den = max(err_l_before, 0.1 * self._err0)
-        rel_l = (err_l_before - err_l_after) / (local_den + self._eps)
-        blended = global_w * rel_g + (1 - global_w) * rel_l
+        base_scale = self._err0 + self._eps
+
+        global_term = (err_g_before - err_g_after) / base_scale
+        global_term = float(np.clip(global_term, -1.0, 1.0))
+
+        local_term = (err_l_before - err_l_after) / base_scale
+        local_term = float(np.clip(local_term, -1.0, 1.0))
 
         vol_norm = removed / (self._max_press_volume + self._eps)
-        reward = blended
-        touch_term = 0.0
-        if touched:
-            waste = max(vol_norm - max(rel_g, 0.0), 0.0)
-            reward -= self._waste_penalty_coeff * waste
-        else:
-            touch_term = -self._no_touch_penalty
-            reward += touch_term
+        vol_norm = float(np.clip(vol_norm, 0.0, 2.0))
 
-        if rel_g <= 0.0:
-            reward -= self._volume_penalty_coeff * vol_norm
-
-        progress_bonus = 0.0
-        if err_g_after < (self._best_err - 1e-6):
-            improvement = (self._best_err - err_g_after) / (self._err0 + self._eps)
-            progress_bonus = self._progress_bonus * (1.0 + np.clip(improvement, 0.0, 1.0))
-            reward += progress_bonus
-            self._best_err = err_g_after
+        reward = (
+            self._global_weight * global_term
+            + self._local_weight * local_term
+            - self._volume_penalty_coeff * vol_norm
+            - self._step_cost
+        )
 
         reward = float(np.clip(reward, -5.0, 5.0))
         self._last_reward_terms = {
-            "rel_global": float(rel_g),
-            "rel_local": float(rel_l),
-            "blended": float(blended),
-            "volume_norm": float(vol_norm),
-            "touch_term": float(touch_term),
-            "progress_bonus": float(progress_bonus),
+            "global_term": global_term,
+            "local_term": local_term,
+            "volume_norm": vol_norm,
+            "volume_penalty": self._volume_penalty_coeff * vol_norm,
+            "step_cost": self._step_cost,
             "reward": reward,
         }
         return reward
