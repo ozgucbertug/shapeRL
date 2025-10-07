@@ -160,7 +160,7 @@ class FPNActorNetwork(network.Network):
 
 
 class FPNCriticNetwork(network.Network):
-    """Critic that augments observations with a Gaussian action focus before encoding."""
+    """Critic that encodes observations and actions independently before fusion."""
 
     def __init__(self, observation_spec, action_spec, name: str = 'FPNCriticNetwork'):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
@@ -169,29 +169,14 @@ class FPNCriticNetwork(network.Network):
         self.fc1 = layers.Dense(128, activation='relu')
         self.fc2 = layers.Dense(64, activation='relu')
         self.q_head = layers.Dense(1)
-        self._gauss_sigma = 0.05
-        self._grid: tf.Tensor | None = None
-
-    def build(self, input_shape):
-        obs_shape, _ = input_shape
-        _, height, width, _ = obs_shape
-        ys = tf.linspace(0.0, 1.0, height)
-        xs = tf.linspace(0.0, 1.0, width)
-        grid_y, grid_x = tf.meshgrid(ys, xs, indexing='ij')
-        grid = tf.stack([grid_x, grid_y], axis=-1)
-        self._grid = tf.reshape(grid, [1, height, width, 2])
-        super().build(input_shape)
 
     def call(self, inputs, step_type=None, network_state=(), training: bool = False):
         observations, actions = inputs
         obs = tf.cast(observations, tf.float32)
-        xy = tf.reshape(actions[..., :2], [-1, 1, 1, 2])
-        dist_sq = tf.reduce_sum((self._grid - xy) ** 2, axis=-1, keepdims=True)
-        gauss = tf.exp(-dist_sq / (2.0 * (self._gauss_sigma ** 2)))
-        obs_aug = tf.concat([obs, gauss], axis=-1)
+        acts = tf.cast(actions, tf.float32)
 
-        latent = self.encoder(obs_aug, training=training)
-        action_latent = self.action_fc(actions)
+        latent = self.encoder(obs, training=training)
+        action_latent = self.action_fc(acts)
         fused = tf.concat([latent, action_latent], axis=-1)
         fused = self.fc1(fused)
         fused = self.fc2(fused)
@@ -293,30 +278,15 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         self.fc1 = layers.Dense(128, activation='relu')
         self.fc2 = layers.Dense(64, activation='relu')
         self.q_head = layers.Dense(1)
-        self._gauss_sigma = 0.05
-        self._grid: tf.Tensor | None = None
-
-    def build(self, input_shape):
-        obs_shape, _ = input_shape
-        _, height, width, _ = obs_shape
-        ys = tf.linspace(0.0, 1.0, height)
-        xs = tf.linspace(0.0, 1.0, width)
-        grid_y, grid_x = tf.meshgrid(ys, xs, indexing='ij')
-        grid = tf.stack([grid_x, grid_y], axis=-1)
-        self._grid = tf.reshape(grid, [1, height, width, 2])
-        super().build(input_shape)
 
     def call(self, inputs, step_type=None, network_state=(), training: bool = False):
         observations, actions = inputs
         obs = tf.cast(observations, tf.float32)
-        xy_action = tf.reshape(actions[..., :2], [-1, 1, 1, 2])
-        dist_sq = tf.reduce_sum((self._grid - xy_action) ** 2, axis=-1, keepdims=True)
-        gauss = tf.exp(-dist_sq / (2.0 * (self._gauss_sigma ** 2)))
-        obs_aug = tf.concat([obs, gauss], axis=-1)
+        acts = tf.cast(actions, tf.float32)
 
-        latent, predicted_xy = self.encoder(obs_aug, training=training)
-        action_latent = self.action_fc(actions)
-        xy_delta = actions[..., :2] - predicted_xy
+        latent, predicted_xy = self.encoder(obs, training=training)
+        action_latent = self.action_fc(acts)
+        xy_delta = acts[..., :2] - predicted_xy
         fused = tf.concat([latent, action_latent, xy_delta], axis=-1)
         fused = self.fc1(fused)
         fused = self.fc2(fused)
@@ -406,4 +376,3 @@ __all__ = [
     'build_unet_encoder',
     'build_gated_encoder',
 ]
-

@@ -69,8 +69,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._progress_bonus = 0.05
         self._best_err = np.inf
 
-        # kept for parity with your previous reward notes
-        self._efficiency_coeff     = 0.10
         self._waste_penalty_coeff  = 0.05
 
         self._local_radius = 3 * self._tool_radius
@@ -353,9 +351,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         reward = blended
         touch_term = 0.0
         if touched:
-            if vol_norm > 1e-4 and rel_g > 0.0:
-                efficiency = rel_g / (vol_norm + self._eps)
-                reward += self._efficiency_coeff * efficiency
             waste = max(vol_norm - max(rel_g, 0.0), 0.0)
             reward -= self._waste_penalty_coeff * waste
         else:
