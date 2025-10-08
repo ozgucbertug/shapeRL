@@ -17,18 +17,18 @@ from dataclasses import dataclass
 class TrainingConfig:
     seed: int | None = None
     encoder_type: str = 'spatial_softmax'
-    num_updates: int = 200000
-    num_parallel_envs: int = 4
+    num_updates: int = 250_000
+    num_parallel_envs: int = 64
     collect_steps_per_update: int = 4
-    batch_size: int = 16
+    batch_size: int = 256
     use_heuristic_warmup: bool = True
-    initial_collect_steps: int | None = None
-    replay_capacity_total: int | None = None
+    initial_collect_steps: int | None = 2**17
+    replay_capacity_total: int | None = 2**19
     debug: bool = False
     env_debug: bool = True
-    log_interval: int = 1000
+    log_interval: int = 1_000
     num_eval_episodes: int = 5
-    eval_interval: int = 1000
+    eval_interval: int = 5_000
     log_eval_curves: bool = True
 
 
