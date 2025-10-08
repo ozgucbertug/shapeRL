@@ -487,13 +487,29 @@ def train(
                 tf.summary.scalar('eval/w2_auc_norm', metrics['w2_auc_norm_mean'], step=step)
                 tf.summary.scalar('eval/w2_slope', metrics['w2_slope_mean'], step=step)
 
-                # Console output for quick look
+                # Log positive-improvement fraction metrics to TensorBoard
+                tf.summary.scalar('eval/pos_frac_rmse', metrics.get('rmse_pos_improve_frac_mean', 0.0), step=step)
+                tf.summary.scalar('eval/pos_frac_mae', metrics.get('mae_pos_improve_frac_mean', 0.0), step=step)
+                tf.summary.scalar('eval/pos_frac_w2', metrics.get('w2_pos_improve_frac_mean', 0.0), step=step)
+
+                # Console output for quick look (multi-line, with relative improvements)
+                tqdm.write(f"[Eval @ {step}]")
                 tqdm.write(
-                    f"[Eval @ {step}] RMSE Δ={metrics['rmse_delta_mean']:.4f} "
-                    f"(init {metrics['init_rmse_mean']:.4f} → final {metrics['final_rmse_mean']:.4f}); "
-                    f"MAE Δ={metrics['mae_delta_mean']:.4f} (init {metrics['init_mae_mean']:.4f} → final {metrics['final_mae_mean']:.4f}); "
-                    f"W2 Δ={metrics['w2_delta_mean']:.4f} (init {metrics['w2_init_mean']:.4f} → final {metrics['w2_final_mean']:.4f}); "
-                    f"Success: {metrics['success_rate']:.2%}"
+                    f"MAE  Δ={metrics['mae_delta_mean']:.4f} %={metrics['mae_rel']:.2%} "
+                    f"(init {metrics['init_mae_mean']:.4f} → final {metrics['final_mae_mean']:.4f})"
+                )
+                tqdm.write(
+                    f"RMSE Δ={metrics['rmse_delta_mean']:.4f} %={metrics['rmse_rel']:.2%} "
+                    f"(init {metrics['init_rmse_mean']:.4f} → final {metrics['final_rmse_mean']:.4f})"
+                )
+                tqdm.write(
+                    f"W2   Δ={metrics['w2_delta_mean']:.4f} %={metrics['w2_rel']:.2%} "
+                    f"(init {metrics['w2_init_mean']:.4f} → final {metrics['w2_final_mean']:.4f})"
+                )
+                tqdm.write(
+                    f"PosImprove% — RMSE {metrics.get('rmse_pos_improve_frac_mean', 0.0):.2%} | "
+                    f"MAE {metrics.get('mae_pos_improve_frac_mean', 0.0):.2%} | "
+                    f"W2 {metrics.get('w2_pos_improve_frac_mean', 0.0):.2%}"
                 )
             if log_interval > 0 and step % log_interval == 0:
                 now = time.perf_counter()

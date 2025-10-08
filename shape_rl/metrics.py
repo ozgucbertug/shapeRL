@@ -198,7 +198,9 @@ def earth_movers_distance(pc_a: np.ndarray, pc_b: np.ndarray, max_points: int = 
 def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes: int = 10,
                  base_seed: int | None = None,
                  w2_stride: int = 4, w2_reg: float = 0.05,
-                 w2_max_points: int = WASSERSTEIN_MAX_POINTS) -> Dict[str, Any]:
+                 w2_max_points: int = WASSERSTEIN_MAX_POINTS,
+                 success_rel_frac: float = 0.05,
+                 success_pos_frac: float = 0.05) -> Dict[str, Any]:
     rmse_deltas: list[float] = []
     rmse_aucs_norm: list[float] = []
     rmse_slopes: list[float] = []
@@ -223,7 +225,13 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
 
     episode_lengths: list[float] = []
     returns: list[float] = []
-    success_flags: list[float] = []
+    # New metrics for positive-diff mass and positive-improvement tracking
+    dplus_init_list: list[float] = []
+    dplus_final_list: list[float] = []
+    # Per-episode fraction of steps with positive improvement (decrease) in RMSE/MAE/W2
+    rmse_pos_improve_fracs: list[float] = []
+    mae_pos_improve_fracs: list[float] = []
+    w2_pos_improve_fracs: list[float] = []
 
     for ep in range(num_episodes):
         env = env_factory(ep if base_seed is None else base_seed + ep)
@@ -238,6 +246,10 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                                           max_points=w2_max_points)
             grad0, lap0 = _grad_lap_rms(diff0)
 
+            # Compute initial positive-diff mass
+            dplus0 = float(np.sum(np.maximum(diff0, 0.0)))
+            dplus_init_list.append(dplus0)
+
             init_rmses.append(rmse0)
             init_maes.append(mae0)
             init_w2s.append(w20)
@@ -248,6 +260,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
             grad_series = [grad0]
             lap_series = [lap0]
             reward_series: list[float] = []
+            last_diff = diff0
 
             while not time_step.is_last():
                 action_step = policy.action(time_step)
@@ -255,6 +268,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                 time_step = tf_env.step(batched_action)
 
                 diff = env._env_map.difference(env._target_map)
+                last_diff = diff
                 rmse_series.append(float(np.sqrt(np.mean(diff ** 2))))
                 mae_series.append(float(np.mean(np.abs(diff))))
                 w2_series.append(wasserstein_distance_2d(env._env_map, env._target_map,
@@ -293,8 +307,26 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
 
         episode_len = max(len(rmse_series) - 1, 0)
         episode_return = float(np.sum(reward_series)) if reward_series else 0.0
-        threshold_abs = getattr(env, '_error_threshold_abs', env._error_threshold)
-        success = 1.0 if rmse_final <= threshold_abs else 0.0
+
+        # Compute final positive-diff mass (dplus)
+        # Use last_diff from last loop iteration, or recompute if needed
+        if 'last_diff' in locals():
+            diffF = last_diff
+        else:
+            diffF = env._env_map.difference(env._target_map)
+        dplusF = float(np.sum(np.maximum(diffF, 0.0)))
+        dplus_final_list.append(dplusF)
+
+        # Compute per-episode positive-improvement fractions for RMSE, MAE, W2
+        def _pos_frac(series, tol=1e-9):
+            s = np.asarray(series, dtype=np.float64)
+            if s.size <= 1:
+                return 0.0
+            diffs = np.diff(s)
+            return float(np.mean(diffs < -tol))  # improvement = decrease
+        rmse_pos_improve_fracs.append(_pos_frac(rmse_series))
+        mae_pos_improve_fracs.append(_pos_frac(mae_series))
+        w2_pos_improve_fracs.append(_pos_frac(w2_series))
 
         rmse_deltas.append(rmse_initial - rmse_final)
         rmse_aucs_norm.append(rmse_auc_n)
@@ -318,12 +350,26 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
 
         episode_lengths.append(episode_len)
         returns.append(episode_return)
-        success_flags.append(success)
+
+    # Compute dplus delta mean
+    dplus_delta_mean = float(np.mean(np.subtract(dplus_init_list, dplus_final_list))) if dplus_init_list and dplus_final_list else 0.0
+
+    # Compute mean init/final values and relative improvements
+    eps = 1e-6
+    init_rmse_mean = float(np.mean(init_rmses)) if init_rmses else 0.0
+    final_rmse_mean = float(np.mean(final_rmses)) if final_rmses else 0.0
+    init_mae_mean = float(np.mean(init_maes)) if init_maes else 0.0
+    final_mae_mean = float(np.mean(final_maes)) if final_maes else 0.0
+    init_w2_mean = float(np.mean(init_w2s)) if init_w2s else 0.0
+    final_w2_mean = float(np.mean(final_w2s)) if final_w2s else 0.0
+    rmse_rel = (init_rmse_mean - final_rmse_mean) / max(init_rmse_mean, eps)
+    mae_rel = (init_mae_mean - final_mae_mean) / max(init_mae_mean, eps)
+    w2_rel = (init_w2_mean - final_w2_mean) / max(init_w2_mean, eps)
 
     metrics = {
         # RMSE
-        'init_rmse_mean': float(np.mean(init_rmses)) if init_rmses else 0.0,
-        'final_rmse_mean': float(np.mean(final_rmses)) if final_rmses else 0.0,
+        'init_rmse_mean': init_rmse_mean,
+        'final_rmse_mean': final_rmse_mean,
         'rmse_delta_mean': float(np.mean(rmse_deltas)),
         'rmse_auc_norm_mean': float(np.mean(rmse_aucs_norm)),
         'rmse_slope_mean': float(np.mean(rmse_slopes)),
@@ -332,10 +378,11 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         'rmse_delta_list': rmse_deltas,
         'rmse_auc_norm_list': rmse_aucs_norm,
         'rmse_slope_list': rmse_slopes,
+        'rmse_rel': float(rmse_rel),
 
         # MAE
-        'init_mae_mean': float(np.mean(init_maes)) if init_maes else 0.0,
-        'final_mae_mean': float(np.mean(final_maes)) if final_maes else 0.0,
+        'init_mae_mean': init_mae_mean,
+        'final_mae_mean': final_mae_mean,
         'mae_delta_mean': float(np.mean(mae_deltas)) if mae_deltas else 0.0,
         'mae_auc_norm_mean': float(np.mean(mae_aucs_norm)) if mae_aucs_norm else 0.0,
         'mae_slope_mean': float(np.mean(mae_slopes)) if mae_slopes else 0.0,
@@ -344,10 +391,11 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         'mae_delta_list': mae_deltas,
         'mae_auc_norm_list': mae_aucs_norm,
         'mae_slope_list': mae_slopes,
+        'mae_rel': float(mae_rel),
 
         # Wasserstein-1 (2D, entropic-regularized)
-        'w2_init_mean': float(np.mean(init_w2s)) if init_w2s else 0.0,
-        'w2_final_mean': float(np.mean(final_w2s)) if final_w2s else 0.0,
+        'w2_init_mean': init_w2_mean,
+        'w2_final_mean': final_w2_mean,
         'w2_delta_mean': float(np.mean(w2_deltas)) if w2_deltas else 0.0,
         'w2_auc_norm_mean': float(np.mean(w2_aucs_norm)) if w2_aucs_norm else 0.0,
         'w2_slope_mean': float(np.mean(w2_slopes)) if w2_slopes else 0.0,
@@ -356,6 +404,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         'w2_delta_list': w2_deltas,
         'w2_auc_norm_list': w2_aucs_norm,
         'w2_slope_list': w2_slopes,
+        'w2_rel': float(w2_rel),
 
         # Gradient/Laplacian diagnostics
         'grad_rms_final_mean': float(np.mean(grad_final_list)) if grad_final_list else 0.0,
@@ -370,10 +419,21 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         # Episode stats
         'episode_length_mean': float(np.mean(episode_lengths)) if episode_lengths else 0.0,
         'return_mean': float(np.mean(returns)) if returns else 0.0,
-        'success_rate': float(np.mean(success_flags)) if success_flags else 0.0,
         'episode_length_list': episode_lengths,
         'return_list': returns,
-        'success_list': success_flags,
+        # Positive-improvement fractions (mean and list)
+        'rmse_pos_improve_frac_mean': float(np.mean(rmse_pos_improve_fracs)) if rmse_pos_improve_fracs else 0.0,
+        'mae_pos_improve_frac_mean': float(np.mean(mae_pos_improve_fracs)) if mae_pos_improve_fracs else 0.0,
+        'w2_pos_improve_frac_mean': float(np.mean(w2_pos_improve_fracs)) if w2_pos_improve_fracs else 0.0,
+        'rmse_pos_improve_frac_list': rmse_pos_improve_fracs,
+        'mae_pos_improve_frac_list': mae_pos_improve_fracs,
+        'w2_pos_improve_frac_list': w2_pos_improve_fracs,
+        # Positive-diff mass (dplus) stats
+        'init_dplus_mean': float(np.mean(dplus_init_list)) if dplus_init_list else 0.0,
+        'final_dplus_mean': float(np.mean(dplus_final_list)) if dplus_final_list else 0.0,
+        'dplus_delta_mean': dplus_delta_mean,
+        'init_dplus_list': dplus_init_list,
+        'final_dplus_list': dplus_final_list,
     }
     return metrics
 
