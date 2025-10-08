@@ -50,6 +50,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._inv_scale_d = 2.0 / self._amp_max   # diff/grad/lap
         self._inv_scale_h = 1.0 / self._amp_max   # heights
 
+        # Per-episode robust scales for diff/grad/lap
+        self._s_diff = 1.0
+        self._s_grad = 1.0
+        self._s_lap  = 1.0
+
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
         self._max_steps = max_steps
@@ -161,14 +166,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
         return lap
 
     def _update_grad_lap(self, diff: np.ndarray):
-        """Update gradient magnitude and Laplacian buffers (scaled & clipped)."""
+        """Update gradient magnitude and Laplacian buffers with per-episode robust scaling."""
+        # Gradient magnitude (non-negative)
         gy, gx = np.gradient(diff)
-        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)             # |∇diff|
-        self._grad_buf *= self._inv_scale_d
-        np.clip(self._grad_buf, -1.0, 1.0, out=self._grad_buf)
+        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff|
+        scale_grad = self._s_grad if self._s_grad > self._eps else 1.0
+        np.divide(self._grad_buf, scale_grad, out=self._grad_buf)
+        # Clip to [0, 1] since this is a magnitude
+        np.clip(self._grad_buf, 0.0, 1.0, out=self._grad_buf)
 
-        lap = self._laplacian(diff)                                 # Δ diff
-        np.multiply(lap, self._inv_scale_d, out=self._lap_buf)
+        # Signed Laplacian
+        lap = self._laplacian(diff)  # writes into self._lap_buf
+        scale_lap = self._s_lap if self._s_lap > self._eps else 1.0
+        np.divide(lap, scale_lap, out=self._lap_buf)
         np.clip(self._lap_buf, -1.0, 1.0, out=self._lap_buf)
 
     # ------------------------------------------------------------------ #
@@ -178,8 +188,9 @@ class SandShapingEnv(py_environment.PyEnvironment):
         """Return the observation tensor using pre-allocated buffers."""
         assert self._env_map is not None
 
-        # 0: signed diff (scaled)
-        np.multiply(diff, self._inv_scale_d, out=self._work_diff)
+        # 0: signed diff (per-episode robust scaled)
+        scale_diff = self._s_diff if self._s_diff > self._eps else 1.0
+        np.divide(diff, scale_diff, out=self._work_diff)
         np.clip(self._work_diff, -1.0, 1.0, out=self._work_diff)
 
         # 1: env height normalized by running mean
@@ -245,8 +256,24 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff = self._env_map.difference(self._target_map, out=self._work_diff)
         h = self._env_map.map
         t = self._target_map.map
+
+        # --- Per-episode robust scales for diff/grad/lap (95th percentile) ---
+        abs_diff = np.abs(diff)
+        self._s_diff = float(max(self._eps, np.percentile(abs_diff, 95.0)))
+
+        gy, gx = np.gradient(diff)
+        grad_mag = np.sqrt(gy * gy + gx * gx)
+        self._s_grad = float(max(self._eps, np.percentile(grad_mag, 95.0)))
+
+        lap = self._laplacian(diff)  # writes into self._lap_buf
+        abs_lap = np.abs(lap)
+        self._s_lap = float(max(self._eps, np.percentile(abs_lap, 95.0)))
+
+        # Initial global error
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
         self._current_err_global = self._err0
+
+        # Build first observation using the new per-episode scales
         obs = self._build_observation(diff, h, t)
         if self.debug:
             self._initial_err0 = self._err0
