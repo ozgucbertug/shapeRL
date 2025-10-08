@@ -11,23 +11,25 @@ from tf_agents.system import system_multiprocessing as tf_mp
 from shape_rl.training import train as _train
 
 
+from dataclasses import dataclass
+
 @dataclass
 class TrainingConfig:
-    """Container for training hyperparameters."""
-
-    num_iterations: int = 200_000
-    num_envs: int = 4
-    batch_size: int = 8
-    collect_steps: int = 2
-    eval_interval: int = 5_000
-    seed: Optional[int] = 42
-    heuristic_warmup: bool = True
-    encoder: str = "spatial_softmax"
+    seed: int | None = None
+    encoder_type: str = 'spatial_softmax'
+    num_updates: int = 200000
+    num_parallel_envs: int = 4
+    collect_steps_per_update: int = 4
+    batch_size: int = 16
+    use_heuristic_warmup: bool = True
+    initial_collect_steps: int | None = None
+    replay_capacity_total: int | None = None
     debug: bool = False
     env_debug: bool = True
-    log_interval: int = 1_000
-    initial_collect_steps: Optional[int] = 4_096
-    replay_capacity_total: Optional[int] = 16_384
+    log_interval: int = 1000
+    num_eval_episodes: int = 5
+    eval_interval: int = 1000
+    log_eval_curves: bool = True
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -40,31 +42,33 @@ train = _train
 
 def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Shape RL training CLI")
-    parser.add_argument("--num_iterations", type=int, default=defaults.num_iterations,
-                        help="Number of training iterations")
-    parser.add_argument("--num_envs", type=int, default=defaults.num_envs,
+    parser.add_argument("--num_updates", type=int, default=defaults.num_updates,
+                        help="Number of training updates")
+    parser.add_argument("--num_parallel_envs", type=int, default=defaults.num_parallel_envs,
                         help="Number of parallel environments for training")
     parser.add_argument("--batch_size", type=int, default=defaults.batch_size,
                         help="Batch size for training updates")
-    parser.add_argument("--collect_steps", type=int, default=defaults.collect_steps,
-                        help="Steps collected per iteration across all environments")
+    parser.add_argument("--collect_steps_per_update", type=int, default=defaults.collect_steps_per_update,
+                        help="Steps collected per update across all environments")
+    parser.add_argument("--num_eval_episodes", type=int, default=defaults.num_eval_episodes,
+                        help="Episodes per evaluation run")
     parser.add_argument("--eval_interval", type=int, default=defaults.eval_interval,
-                        help="Iterations between evaluation runs")
+                        help="Updates between evaluation runs")
     parser.add_argument("--seed", type=int, default=defaults.seed,
                         help="Random seed (omit to use library default stochastic behaviour)")
-    parser.add_argument("--encoder", type=str, default=defaults.encoder,
-                        choices=["cnn", "fpn", "spatial", "spatial_softmax"],
+    parser.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
+                        choices=["cnn", "fpn", "spatial_softmax"],
                         help="Backbone encoder architecture for actor/critic")
     parser.add_argument("--log_interval", type=int, default=defaults.log_interval,
-                        help="Iterations between throughput logs")
+                        help="Updates between throughput logs")
     parser.add_argument("--initial_collect_steps", type=int, default=defaults.initial_collect_steps,
                         help="Warm-up transitions to gather before training (default auto-computed)")
     parser.add_argument("--replay_capacity_total", type=int, default=defaults.replay_capacity_total,
                         help="Total replay capacity (overrides default sizing computed from batch/parallel envs)")
 
-    parser.add_argument("--heuristic_warmup", dest="heuristic_warmup", action="store_true",
+    parser.add_argument("--heuristic_warmup", dest="use_heuristic_warmup", action="store_true",
                         help="Use heuristic policy to warm up the replay buffer")
-    parser.add_argument("--no_heuristic_warmup", dest="heuristic_warmup", action="store_false",
+    parser.add_argument("--no_heuristic_warmup", dest="use_heuristic_warmup", action="store_false",
                         help="Disable heuristic warm-up; rely on random actions")
     parser.add_argument("--debug", dest="debug", action="store_true",
                         help="Enable verbose environment logging and TensorBoard scalars")
@@ -74,8 +78,11 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
                         help="Enable env debug mode (passes through to SandShapingEnv)")
     parser.add_argument("--no_env_debug", dest="env_debug", action="store_false",
                         help="Disable env debug mode for faster execution")
+    parser.add_argument("--log_eval_curves", action="store_true",
+                        default=defaults.log_eval_curves,
+                        help="Enable per-step eval curve logging to TensorBoard (default: off)")
     parser.set_defaults(
-        heuristic_warmup=defaults.heuristic_warmup,
+        use_heuristic_warmup=defaults.use_heuristic_warmup,
         debug=defaults.debug,
         env_debug=defaults.env_debug,
     )
@@ -98,18 +105,20 @@ def run(config: Optional[TrainingConfig] = None) -> None:
     cfg = config or CONFIG
     _train(
         eval_interval=cfg.eval_interval,
-        num_parallel_envs=cfg.num_envs,
+        num_parallel_envs=cfg.num_parallel_envs,
         seed=cfg.seed,
         batch_size=cfg.batch_size,
-        collect_steps_per_iteration=cfg.collect_steps,
-        num_iterations=cfg.num_iterations,
-        use_heuristic_warmup=cfg.heuristic_warmup,
-        encoder_type=cfg.encoder,
+        collect_steps_per_update=cfg.collect_steps_per_update,
+        num_updates=cfg.num_updates,
+        num_eval_episodes=cfg.num_eval_episodes,
+        use_heuristic_warmup=cfg.use_heuristic_warmup,
+        encoder_type=cfg.encoder_type,
         debug=cfg.debug,
         log_interval=cfg.log_interval,
         initial_collect_steps=cfg.initial_collect_steps,
         env_debug=cfg.env_debug,
         replay_capacity_total=cfg.replay_capacity_total,
+        log_eval_curves=cfg.log_eval_curves,
     )
 
 
@@ -134,7 +143,4 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    # Using tf_mp.handle_main introduces an absl.app run loop that can hang
-    # when the script is launched via `conda run`. We rely on `run_cli` to
-    # initialise TF-Agents multiprocessing instead, so invoke main directly.
     main()

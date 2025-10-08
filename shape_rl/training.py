@@ -30,7 +30,7 @@ import tensorflow_probability as tfp
 
 
 from shape_rl.envs import SandShapingEnv
-from shape_rl.metrics import compute_eval, wasserstein_distance_2d
+from shape_rl.metrics import compute_eval, print_eval_metrics, log_eval_metric_curves, summarize_metric_series
 from shape_rl.policies import HeuristicPressPolicy
 from datetime import datetime
 
@@ -54,11 +54,12 @@ def _make_env(seed: int | None, debug: bool = False) -> callable:
 
 def train(
     num_parallel_envs: int = 4,
-    eval_interval: int = 1000,
+    eval_interval: int = 5000,
     seed: int | None = None,
     batch_size: int = 16,
-    collect_steps_per_iteration: int = 4,
-    num_iterations: int = 200000,
+    collect_steps_per_update: int = 4,
+    num_updates: int = 200000,
+    num_eval_episodes: int = 5,
     use_heuristic_warmup: bool = False,
     encoder_type: str = 'cnn',
     debug: bool = False,
@@ -66,6 +67,7 @@ def train(
     initial_collect_steps: int | None = None,
     env_debug: bool = True,
     replay_capacity_total: int | None = None,
+    log_eval_curves: bool = False,
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:
@@ -84,23 +86,22 @@ def train(
         target_total_replay = max(4096 * 4, batch_size * 64)
     replay_buffer_capacity = max(1, math.ceil(target_total_replay / env_divisor))
     total_replay_capacity = replay_buffer_capacity * env_divisor
-    learning_rate = 1e-4
+    learning_rate = 3e-4
     gamma = 0.99
-    num_eval_episodes = 5
     tqdm.write(
         "[Init] Derived hyperparameters — "
         f"replay_capacity_per_env={replay_buffer_capacity}, "
         f"total_replay_capacity={total_replay_capacity}, "
-        f"collect_steps_per_iteration={collect_steps_per_iteration}"
+        f"collect_steps_per_update={collect_steps_per_update}"
     )
 
     min_collect_steps = max(1, math.ceil(batch_size / max(1, num_parallel_envs)))
-    if collect_steps_per_iteration < min_collect_steps:
-        prev_collect = collect_steps_per_iteration
-        collect_steps_per_iteration = int(min_collect_steps)
+    if collect_steps_per_update < min_collect_steps:
+        prev_collect = collect_steps_per_update
+        collect_steps_per_update = int(min_collect_steps)
         tqdm.write(
-            "[Config] collect_steps_per_iteration increased "
-            f"from {prev_collect} to {collect_steps_per_iteration} so each iteration "
+            "[Config] collect_steps_per_update increased "
+            f"from {prev_collect} to {collect_steps_per_update} so each update "
             "collects at least one full training batch."
         )
 
@@ -140,7 +141,7 @@ def train(
     if encoder_type == 'fpn':
         actor_net = FPNActorNetwork(observation_spec, action_spec)
         critic_net = FPNCriticNetwork(observation_spec, action_spec)
-    elif encoder_type in ('spatial', 'spatial_softmax'):
+    elif encoder_type == 'spatial_softmax':
         actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
         critic_net = SpatialSoftmaxCriticNetwork(observation_spec, action_spec)
     elif encoder_type == 'cnn':
@@ -189,6 +190,7 @@ def train(
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
     tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
+
 
     def collect_summary(trajectory):
         # Log the mean reward of the collected trajectories
@@ -242,7 +244,7 @@ def train(
             action_summary,
             buffer_summary
         ],
-        num_steps=collect_steps_per_iteration
+        num_steps=collect_steps_per_update
     )
     tqdm.write("[Drivers] Collection driver prepared")
 
@@ -256,57 +258,11 @@ def train(
         tool_radius=eval_py_env._tool_radius,
         amp_max=eval_py_env._amplitude_range[1],
     )
-    rmse_init_vals: list[float] = []
-    rmse_final_vals: list[float] = []
-    mae_init_vals: list[float] = []
-    mae_final_vals: list[float] = []
-    w2_init_vals: list[float] = []
-    w2_final_vals: list[float] = []
-    deltas = []
-    rels = []
-    for _ in range(10):
-        ts_py = eval_py_env.reset()
-        diff0 = eval_py_env._env_map.difference(eval_py_env._target_map)
-        rmse0 = float(np.sqrt(np.mean(diff0**2)))
-        mae0 = float(np.mean(np.abs(diff0)))
-        w20 = wasserstein_distance_2d(eval_py_env._env_map, eval_py_env._target_map)
-
-        ts_step = ts_py
-        while not ts_step.is_last():
-            action_step = heuristic_policy.action(ts_step)
-            act = action_step.action
-            ts_step = eval_py_env.step(act)
-
-        diffF = eval_py_env._env_map.difference(eval_py_env._target_map)
-        rmseF = float(np.sqrt(np.mean(diffF**2)))
-        maeF = float(np.mean(np.abs(diffF)))
-        w2F = wasserstein_distance_2d(eval_py_env._env_map, eval_py_env._target_map)
-
-        rmse_init_vals.append(rmse0)
-        rmse_final_vals.append(rmseF)
-        mae_init_vals.append(mae0)
-        mae_final_vals.append(maeF)
-        w2_init_vals.append(w20)
-        w2_final_vals.append(w2F)
-
-        deltas.append(rmse0 - rmseF)
-        rels.append((rmse0 - rmseF) / (rmse0 + 1e-6))
-
-    rmse_init_mean = float(np.mean(rmse_init_vals))
-    rmse_final_mean = float(np.mean(rmse_final_vals))
-    mae_init_mean = float(np.mean(mae_init_vals))
-    mae_final_mean = float(np.mean(mae_final_vals))
-    w2_init_mean = float(np.mean(w2_init_vals))
-    w2_final_mean = float(np.mean(w2_final_vals))
-    delta_mean = float(np.mean(deltas))
-    rel_mean = float(np.mean(rels))
-
-    tqdm.write(
-        f"[Heuristic Eval] RMSE {rmse_init_mean:.4f} -> {rmse_final_mean:.4f} "
-        f"(Δ {delta_mean:.4f}, rel {rel_mean:.2%}); "
-        f"MAE {mae_init_mean:.4f} -> {mae_final_mean:.4f}; "
-        f"W2 {w2_init_mean:.4f} -> {w2_final_mean:.4f}"
-    )
+    # Evaluate heuristic with the unified compute_eval for consistency
+    heur_metrics = compute_eval(eval_env_factory, heuristic_policy, num_eval_episodes, base_seed=eval_base_seed)
+    print_eval_metrics(heur_metrics, header="Heuristic Eval")
+    if log_eval_curves:
+        log_eval_metric_curves(heur_metrics, logdir, run_name="eval_heuristic")
 
     # Warm-up buffer: heuristic or random
     def _num_frames() -> int:
@@ -320,11 +276,11 @@ def train(
         train_env,
         random_policy,
         observers=[replay_buffer.add_batch],
-        num_steps=collect_steps_per_iteration
+        num_steps=collect_steps_per_update
     )
 
     if initial_collect_steps is None:
-        initial_collect_steps = max(batch_size * 2, collect_steps_per_iteration * num_parallel_envs * 4)
+        initial_collect_steps = max(batch_size * 2, collect_steps_per_update * num_parallel_envs * 4)
 
     warmup_mode = 'heuristic' if use_heuristic_warmup else 'random'
     tqdm.write(
@@ -355,7 +311,7 @@ def train(
             train_py_env,
             heuristic_policy,
             observers=observers,
-            max_steps=collect_steps_per_iteration * num_parallel_envs,
+            max_steps=collect_steps_per_update * num_parallel_envs,
         )
         warmup_ts = train_py_env.reset()
         while _num_frames() < initial_collect_steps:
@@ -393,7 +349,7 @@ def train(
         f"encoder: {encoder_type}",
         f"parallel_envs: {num_parallel_envs}",
         f"batch_size: {batch_size}",
-        f"collect_steps_per_iteration: {collect_steps_per_iteration}",
+        f"collect_steps_per_update: {collect_steps_per_update}",
         f"initial_collect_steps: {initial_collect_steps}",
         f"warmup: {'heuristic' if use_heuristic_warmup else 'random'}",
         f"replay_capacity_total: {total_replay_capacity}",
@@ -416,12 +372,12 @@ def train(
         return tf_agent.train(experience)
 
     last_log_time = time.perf_counter()
-    last_log_step = 0
+    last_log_update = 0
 
-    current_step = 0
+    current_update = 0
     try:
-        for step in trange(1, num_iterations + 1, desc='Training', dynamic_ncols=True, leave=True):
-            current_step = step
+        for update in trange(1, num_updates + 1, desc='Updates', dynamic_ncols=True, leave=True):
+            current_update = update
             collect_step()
             experience, _ = next(iterator)
             train_info = train_step(experience)
@@ -438,28 +394,28 @@ def train(
                 step_lap = [env._last_lap for env in python_envs if hasattr(env, '_last_lap')]
                 if step_removed:
                     tf.summary.scalar('train/removed_volume_norm',
-                                      float(np.mean(step_removed)), step=step)
+                                      float(np.mean(step_removed)), step=update)
                 if step_rel:
                     tf.summary.scalar('train/rel_improve',
-                                      float(np.mean(step_rel)), step=step)
+                                      float(np.mean(step_rel)), step=update)
                 if step_reward:
                     tf.summary.scalar('train/step_reward',
-                                      float(np.mean(step_reward)), step=step)
+                                      float(np.mean(step_reward)), step=update)
                 if step_err_g:
                     tf.summary.scalar('train/global_rmse',
-                                      float(np.mean(step_err_g)), step=step)
+                                      float(np.mean(step_err_g)), step=update)
                 if step_err_l:
                     tf.summary.scalar('train/local_rmse',
-                                      float(np.mean(step_err_l)), step=step)
+                                      float(np.mean(step_err_l)), step=update)
                 if step_removed_abs:
                     tf.summary.scalar('train/removed_volume_abs',
-                                      float(np.mean(step_removed_abs)), step=step)
+                                      float(np.mean(step_removed_abs)), step=update)
                 if step_grad:
                     tf.summary.scalar('train/grad_rmse',
-                                      float(np.mean(step_grad)), step=step)
+                                      float(np.mean(step_grad)), step=update)
                 if step_lap:
                     tf.summary.scalar('train/lap_rmse',
-                                      float(np.mean(step_lap)), step=step)
+                                      float(np.mean(step_lap)), step=update)
 
                 reward_terms: dict[str, list[float]] = {}
                 for env in python_envs:
@@ -470,53 +426,41 @@ def train(
                         reward_terms.setdefault(key, []).append(value)
                 for key, values in reward_terms.items():
                     tf.summary.scalar(f'train/reward_terms/{key}',
-                                      float(np.mean(values)), step=step)
-            if eval_interval > 0 and step % eval_interval == 0:
+                                      float(np.mean(values)), step=update)
+            if eval_interval > 0 and update % eval_interval == 0:
                 # Detailed evaluation metrics
                 metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
+                rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
+                mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
+                w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
+                
                 # Log evaluation scalars
-                tf.summary.scalar('eval/rmse_delta', metrics['rmse_delta_mean'], step=step)
-                tf.summary.scalar('eval/rmse_auc_norm', metrics['rmse_auc_norm_mean'], step=step)
-                tf.summary.scalar('eval/rmse_slope', metrics['rmse_slope_mean'], step=step)
+                tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=update)
+                tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=update)
+                tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=update)
 
-                tf.summary.scalar('eval/mae_delta', metrics['mae_delta_mean'], step=step)
-                tf.summary.scalar('eval/mae_auc_norm', metrics['mae_auc_norm_mean'], step=step)
-                tf.summary.scalar('eval/mae_slope', metrics['mae_slope_mean'], step=step)
+                tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=update)
+                tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=update)
+                tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=update)
 
-                tf.summary.scalar('eval/w2_delta', metrics['w2_delta_mean'], step=step)
-                tf.summary.scalar('eval/w2_auc_norm', metrics['w2_auc_norm_mean'], step=step)
-                tf.summary.scalar('eval/w2_slope', metrics['w2_slope_mean'], step=step)
+                tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=update)
+                tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=update)
+                tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=update)
 
-                # Log positive-improvement fraction metrics to TensorBoard
-                tf.summary.scalar('eval/pos_frac_rmse', metrics.get('rmse_pos_improve_frac_mean', 0.0), step=step)
-                tf.summary.scalar('eval/pos_frac_mae', metrics.get('mae_pos_improve_frac_mean', 0.0), step=step)
-                tf.summary.scalar('eval/pos_frac_w2', metrics.get('w2_pos_improve_frac_mean', 0.0), step=step)
+                # Log per-update eval curves as native TensorBoard scalars in a separate run dir
+                if log_eval_curves:
+                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:09d}")
 
-                # Console output for quick look (multi-line, with relative improvements)
-                tqdm.write(f"[Eval @ {step}]")
-                tqdm.write(
-                    f"MAE  Δ={metrics['mae_delta_mean']:.4f} %={metrics['mae_rel']:.2%} "
-                    f"(init {metrics['init_mae_mean']:.4f} → final {metrics['final_mae_mean']:.4f})"
-                )
-                tqdm.write(
-                    f"RMSE Δ={metrics['rmse_delta_mean']:.4f} %={metrics['rmse_rel']:.2%} "
-                    f"(init {metrics['init_rmse_mean']:.4f} → final {metrics['final_rmse_mean']:.4f})"
-                )
-                tqdm.write(
-                    f"W2   Δ={metrics['w2_delta_mean']:.4f} %={metrics['w2_rel']:.2%} "
-                    f"(init {metrics['w2_init_mean']:.4f} → final {metrics['w2_final_mean']:.4f})"
-                )
-                tqdm.write(
-                    f"PosImprove% — RMSE {metrics.get('rmse_pos_improve_frac_mean', 0.0):.2%} | "
-                    f"MAE {metrics.get('mae_pos_improve_frac_mean', 0.0):.2%} | "
-                    f"W2 {metrics.get('w2_pos_improve_frac_mean', 0.0):.2%}"
-                )
-            if log_interval > 0 and step % log_interval == 0:
+                print_eval_metrics(metrics, header="Eval", step=update)
+            if log_interval > 0 and update % log_interval == 0:
                 now = time.perf_counter()
                 elapsed = max(now - last_log_time, 1e-6)
-                step_delta = step - last_log_step
-                iters_per_sec = step_delta / elapsed
-                env_steps = step_delta * collect_steps_per_iteration * num_parallel_envs
+                update_delta = update - last_log_update
+                updates_per_sec = update_delta / elapsed
+                env_steps = update_delta * collect_steps_per_update * num_parallel_envs
                 env_steps_per_sec = env_steps / elapsed
 
                 # Gather lightweight scalar metrics
@@ -544,14 +488,14 @@ def train(
 
                 metrics_str = ' '.join(loss_components)
                 tqdm.write(
-                    f"[Train @ {step}] it/s={iters_per_sec:.1f} env/s={env_steps_per_sec:.1f} "
+                    f"[Train @ {update}] upd/s={updates_per_sec:.1f} env/s={env_steps_per_sec:.1f} "
                     f"{metrics_str}"
                 )
 
                 last_log_time = now
-                last_log_step = step
+                last_log_update = update
     except KeyboardInterrupt:
-        tqdm.write(f"[Train] Interrupted at step {current_step}")
+        tqdm.write(f"[Train] Interrupted at update {current_update}")
     else:
         tqdm.write("[Train] Completed optimisation loop")
     finally:

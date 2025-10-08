@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Any
+import os
+import tensorflow as tf
+from typing import Callable, Dict, Any, Sequence
 from contextlib import suppress
 
 import numpy as np
@@ -10,6 +12,9 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from tf_agents.environments import tf_py_environment
+from tf_agents.policies import py_policy as _py_policy
+
+from tqdm.auto import tqdm
 
 from shape_rl.terrain import HeightMap
 
@@ -37,16 +42,6 @@ def _block_sum(arr: np.ndarray, stride: int) -> np.ndarray:
     trimmed = arr[:h2, :w2]
     reshaped = trimmed.reshape(h2 // stride, stride, w2 // stride, stride)
     return reshaped.sum(axis=(1, 3)).astype(np.float64)
-
-
-def _grad_lap_rms(diff: np.ndarray) -> tuple[float, float]:
-    gy, gx = np.gradient(diff)
-    grad_rms = float(np.sqrt(np.mean(gy * gy + gx * gx)))
-    # 5-point Laplacian
-    lap = (np.roll(diff, 1, axis=0) + np.roll(diff, -1, axis=0) +
-           np.roll(diff, 1, axis=1) + np.roll(diff, -1, axis=1) - 4.0 * diff)
-    lap_rms = float(np.sqrt(np.mean(lap * lap)))
-    return grad_rms, lap_rms
 
 
 def _prepare_wasserstein_masses(diff: np.ndarray, stride: int, mass_threshold: float) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -198,244 +193,205 @@ def earth_movers_distance(pc_a: np.ndarray, pc_b: np.ndarray, max_points: int = 
 def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes: int = 10,
                  base_seed: int | None = None,
                  w2_stride: int = 4, w2_reg: float = 0.05,
-                 w2_max_points: int = WASSERSTEIN_MAX_POINTS,
-                 success_rel_frac: float = 0.05,
-                 success_pos_frac: float = 0.05) -> Dict[str, Any]:
-    rmse_deltas: list[float] = []
-    rmse_aucs_norm: list[float] = []
-    rmse_slopes: list[float] = []
-    mae_deltas: list[float] = []
-    mae_aucs_norm: list[float] = []
-    mae_slopes: list[float] = []
-    w2_deltas: list[float] = []
-    w2_aucs_norm: list[float] = []
-    w2_slopes: list[float] = []
+                 w2_max_points: int = WASSERSTEIN_MAX_POINTS) -> Dict[str, Any]:
 
-    init_rmses: list[float] = []
-    final_rmses: list[float] = []
-    init_maes: list[float] = []
-    final_maes: list[float] = []
-    init_w2s: list[float] = []
-    final_w2s: list[float] = []
-
-    grad_final_list: list[float] = []
-    lap_final_list: list[float] = []
-    grad_auc_norm_list: list[float] = []
-    lap_auc_norm_list: list[float] = []
-
-    episode_lengths: list[float] = []
-    returns: list[float] = []
-    # New metrics for positive-diff mass and positive-improvement tracking
-    dplus_init_list: list[float] = []
-    dplus_final_list: list[float] = []
-    # Per-episode fraction of steps with positive improvement (decrease) in RMSE/MAE/W2
-    rmse_pos_improve_fracs: list[float] = []
-    mae_pos_improve_fracs: list[float] = []
-    w2_pos_improve_fracs: list[float] = []
+    rmse_series_list: list[list[float]] = []
+    mae_series_list: list[list[float]] = []
+    w2_series_list: list[list[float]] = []
 
     for ep in range(num_episodes):
         env = env_factory(ep if base_seed is None else base_seed + ep)
-        tf_env = tf_py_environment.TFPyEnvironment(env)
+        is_py_policy = isinstance(policy, _py_policy.PyPolicy)
+        tf_env = None
         try:
-            time_step = tf_env.reset()
+            if is_py_policy:
+                time_step = env.reset()
+            else:
+                tf_env = tf_py_environment.TFPyEnvironment(env)
+                time_step = tf_env.reset()
             diff0 = env._env_map.difference(env._target_map)
             rmse0 = float(np.sqrt(np.mean(diff0 ** 2)))
             mae0 = float(np.mean(np.abs(diff0)))
             w20 = wasserstein_distance_2d(env._env_map, env._target_map,
                                           stride=w2_stride, reg=w2_reg,
                                           max_points=w2_max_points)
-            grad0, lap0 = _grad_lap_rms(diff0)
-
-            # Compute initial positive-diff mass
-            dplus0 = float(np.sum(np.maximum(diff0, 0.0)))
-            dplus_init_list.append(dplus0)
-
-            init_rmses.append(rmse0)
-            init_maes.append(mae0)
-            init_w2s.append(w20)
 
             rmse_series = [rmse0]
             mae_series = [mae0]
             w2_series = [w20]
-            grad_series = [grad0]
-            lap_series = [lap0]
-            reward_series: list[float] = []
-            last_diff = diff0
 
             while not time_step.is_last():
                 action_step = policy.action(time_step)
-                batched_action = action_step.action
-                time_step = tf_env.step(batched_action)
+                action = action_step.action
+                if is_py_policy:
+                    time_step = env.step(action)
+                else:
+                    time_step = tf_env.step(action)
 
                 diff = env._env_map.difference(env._target_map)
-                last_diff = diff
                 rmse_series.append(float(np.sqrt(np.mean(diff ** 2))))
                 mae_series.append(float(np.mean(np.abs(diff))))
                 w2_series.append(wasserstein_distance_2d(env._env_map, env._target_map,
                                                          stride=w2_stride, reg=w2_reg,
                                                          max_points=w2_max_points))
-                g, l = _grad_lap_rms(diff)
-                grad_series.append(g)
-                lap_series.append(l)
-                try:
-                    reward_series.append(float(time_step.reward.numpy()))
-                except Exception:
-                    pass
         finally:
             with suppress(Exception):
-                tf_env.close()
+                (tf_env.close() if tf_env is not None else None)
             with suppress(Exception):
                 env.close()
 
-        rmse_initial = rmse_series[0]
-        rmse_final = rmse_series[-1]
-        mae_initial = mae_series[0]
-        mae_final = mae_series[-1]
-        w2_initial = w2_series[0]
-        w2_final = w2_series[-1]
+        rmse_series_list.append(rmse_series)
+        mae_series_list.append(mae_series)
+        w2_series_list.append(w2_series)
 
-        steps = np.arange(len(rmse_series))
-        rmse_slope = float(np.polyfit(steps, rmse_series, 1)[0])
-        mae_slope = float(np.polyfit(steps, mae_series, 1)[0])
-        w2_slope = float(np.polyfit(steps, w2_series, 1)[0])
+    def _stack_pad_nan(series_list):
+        if not series_list:
+            return None
+        m = max(len(s) for s in series_list)
+        if m <= 0:
+            return None
+        arr = np.full((len(series_list), m), np.nan, dtype=np.float64)
+        for i, s in enumerate(series_list):
+            si = np.asarray(s, dtype=np.float64)
+            arr[i, :si.size] = si
+        return arr
+    rmse_arr = _stack_pad_nan(rmse_series_list)
+    mae_arr = _stack_pad_nan(mae_series_list)
+    w2_arr = _stack_pad_nan(w2_series_list)
+    rmse_mean = np.nanmean(rmse_arr, axis=0).tolist() if rmse_arr is not None else []
+    mae_mean = np.nanmean(mae_arr, axis=0).tolist() if mae_arr is not None else []
+    w2_mean = np.nanmean(w2_arr, axis=0).tolist() if w2_arr is not None else []
 
-        rmse_auc_n = normalized_auc(rmse_series)
-        mae_auc_n = normalized_auc(mae_series)
-        w2_auc_n = normalized_auc(w2_series)
-        grad_auc_n = normalized_auc(grad_series)
-        lap_auc_n = normalized_auc(lap_series)
-
-        episode_len = max(len(rmse_series) - 1, 0)
-        episode_return = float(np.sum(reward_series)) if reward_series else 0.0
-
-        # Compute final positive-diff mass (dplus)
-        # Use last_diff from last loop iteration, or recompute if needed
-        if 'last_diff' in locals():
-            diffF = last_diff
-        else:
-            diffF = env._env_map.difference(env._target_map)
-        dplusF = float(np.sum(np.maximum(diffF, 0.0)))
-        dplus_final_list.append(dplusF)
-
-        # Compute per-episode positive-improvement fractions for RMSE, MAE, W2
-        def _pos_frac(series, tol=1e-9):
-            s = np.asarray(series, dtype=np.float64)
-            if s.size <= 1:
-                return 0.0
-            diffs = np.diff(s)
-            return float(np.mean(diffs < -tol))  # improvement = decrease
-        rmse_pos_improve_fracs.append(_pos_frac(rmse_series))
-        mae_pos_improve_fracs.append(_pos_frac(mae_series))
-        w2_pos_improve_fracs.append(_pos_frac(w2_series))
-
-        rmse_deltas.append(rmse_initial - rmse_final)
-        rmse_aucs_norm.append(rmse_auc_n)
-        rmse_slopes.append(rmse_slope)
-        final_rmses.append(rmse_final)
-
-        mae_deltas.append(mae_initial - mae_final)
-        mae_aucs_norm.append(mae_auc_n)
-        mae_slopes.append(mae_slope)
-        final_maes.append(mae_final)
-
-        w2_deltas.append(w2_initial - w2_final)
-        w2_aucs_norm.append(w2_auc_n)
-        w2_slopes.append(w2_slope)
-        final_w2s.append(w2_final)
-
-        grad_final_list.append(float(grad_series[-1]))
-        lap_final_list.append(float(lap_series[-1]))
-        grad_auc_norm_list.append(grad_auc_n)
-        lap_auc_norm_list.append(lap_auc_n)
-
-        episode_lengths.append(episode_len)
-        returns.append(episode_return)
-
-    # Compute dplus delta mean
-    dplus_delta_mean = float(np.mean(np.subtract(dplus_init_list, dplus_final_list))) if dplus_init_list and dplus_final_list else 0.0
-
-    # Compute mean init/final values and relative improvements
-    eps = 1e-6
-    init_rmse_mean = float(np.mean(init_rmses)) if init_rmses else 0.0
-    final_rmse_mean = float(np.mean(final_rmses)) if final_rmses else 0.0
-    init_mae_mean = float(np.mean(init_maes)) if init_maes else 0.0
-    final_mae_mean = float(np.mean(final_maes)) if final_maes else 0.0
-    init_w2_mean = float(np.mean(init_w2s)) if init_w2s else 0.0
-    final_w2_mean = float(np.mean(final_w2s)) if final_w2s else 0.0
-    rmse_rel = (init_rmse_mean - final_rmse_mean) / max(init_rmse_mean, eps)
-    mae_rel = (init_mae_mean - final_mae_mean) / max(init_mae_mean, eps)
-    w2_rel = (init_w2_mean - final_w2_mean) / max(init_w2_mean, eps)
-
-    metrics = {
-        # RMSE
-        'init_rmse_mean': init_rmse_mean,
-        'final_rmse_mean': final_rmse_mean,
-        'rmse_delta_mean': float(np.mean(rmse_deltas)),
-        'rmse_auc_norm_mean': float(np.mean(rmse_aucs_norm)),
-        'rmse_slope_mean': float(np.mean(rmse_slopes)),
-        'init_rmse_list': init_rmses,
-        'final_rmse_list': final_rmses,
-        'rmse_delta_list': rmse_deltas,
-        'rmse_auc_norm_list': rmse_aucs_norm,
-        'rmse_slope_list': rmse_slopes,
-        'rmse_rel': float(rmse_rel),
-
-        # MAE
-        'init_mae_mean': init_mae_mean,
-        'final_mae_mean': final_mae_mean,
-        'mae_delta_mean': float(np.mean(mae_deltas)) if mae_deltas else 0.0,
-        'mae_auc_norm_mean': float(np.mean(mae_aucs_norm)) if mae_aucs_norm else 0.0,
-        'mae_slope_mean': float(np.mean(mae_slopes)) if mae_slopes else 0.0,
-        'init_mae_list': init_maes,
-        'final_mae_list': final_maes,
-        'mae_delta_list': mae_deltas,
-        'mae_auc_norm_list': mae_aucs_norm,
-        'mae_slope_list': mae_slopes,
-        'mae_rel': float(mae_rel),
-
-        # Wasserstein-1 (2D, entropic-regularized)
-        'w2_init_mean': init_w2_mean,
-        'w2_final_mean': final_w2_mean,
-        'w2_delta_mean': float(np.mean(w2_deltas)) if w2_deltas else 0.0,
-        'w2_auc_norm_mean': float(np.mean(w2_aucs_norm)) if w2_aucs_norm else 0.0,
-        'w2_slope_mean': float(np.mean(w2_slopes)) if w2_slopes else 0.0,
-        'w2_init_list': init_w2s,
-        'w2_final_list': final_w2s,
-        'w2_delta_list': w2_deltas,
-        'w2_auc_norm_list': w2_aucs_norm,
-        'w2_slope_list': w2_slopes,
-        'w2_rel': float(w2_rel),
-
-        # Gradient/Laplacian diagnostics
-        'grad_rms_final_mean': float(np.mean(grad_final_list)) if grad_final_list else 0.0,
-        'lap_rms_final_mean': float(np.mean(lap_final_list)) if lap_final_list else 0.0,
-        'grad_rms_auc_norm_mean': float(np.mean(grad_auc_norm_list)) if grad_auc_norm_list else 0.0,
-        'lap_rms_auc_norm_mean': float(np.mean(lap_auc_norm_list)) if lap_auc_norm_list else 0.0,
-        'grad_rms_final_list': grad_final_list,
-        'lap_rms_final_list': lap_final_list,
-        'grad_rms_auc_norm_list': grad_auc_norm_list,
-        'lap_rms_auc_norm_list': lap_auc_norm_list,
-
-        # Episode stats
-        'episode_length_mean': float(np.mean(episode_lengths)) if episode_lengths else 0.0,
-        'return_mean': float(np.mean(returns)) if returns else 0.0,
-        'episode_length_list': episode_lengths,
-        'return_list': returns,
-        # Positive-improvement fractions (mean and list)
-        'rmse_pos_improve_frac_mean': float(np.mean(rmse_pos_improve_fracs)) if rmse_pos_improve_fracs else 0.0,
-        'mae_pos_improve_frac_mean': float(np.mean(mae_pos_improve_fracs)) if mae_pos_improve_fracs else 0.0,
-        'w2_pos_improve_frac_mean': float(np.mean(w2_pos_improve_fracs)) if w2_pos_improve_fracs else 0.0,
-        'rmse_pos_improve_frac_list': rmse_pos_improve_fracs,
-        'mae_pos_improve_frac_list': mae_pos_improve_fracs,
-        'w2_pos_improve_frac_list': w2_pos_improve_fracs,
-        # Positive-diff mass (dplus) stats
-        'init_dplus_mean': float(np.mean(dplus_init_list)) if dplus_init_list else 0.0,
-        'final_dplus_mean': float(np.mean(dplus_final_list)) if dplus_final_list else 0.0,
-        'dplus_delta_mean': dplus_delta_mean,
-        'init_dplus_list': dplus_init_list,
-        'final_dplus_list': dplus_final_list,
+    return {
+        'rmse_series_mean': rmse_mean,
+        'mae_series_mean': mae_mean,
+        'w2_series_mean': w2_mean,
     }
-    return metrics
+
+
+def summarize_metric_series(series: Sequence[float], pos_tol: float = 1e-9) -> Dict[str, float]:
+    """
+    Derive scalar summary statistics from a per-step metric series.
+    Returns deltas, slopes, normalized AUC, relative improvement, and the
+    fraction of steps with positive (decreasing) improvements.
+    """
+    fallback = {
+        'initial': -1.0,
+        'final': -1.0,
+        'delta': -1.0,
+        'slope': -1.0,
+        'auc_norm': -1.0,
+        'pos_improve_frac': -1.0,
+        'relative_improvement': -1.0,
+    }
+
+    arr = np.asarray(series, dtype=np.float64)
+    if arr.size == 0:
+        return fallback
+    finite_mask = np.isfinite(arr)
+    if not finite_mask.any():
+        return fallback
+
+    start_idx = int(np.argmax(finite_mask))
+    trimmed = arr[start_idx:]
+    contiguous_values: list[float] = []
+    for value in trimmed:
+        if np.isfinite(value):
+            contiguous_values.append(float(value))
+        else:
+            break
+    values = np.asarray(contiguous_values, dtype=np.float64)
+    if values.size == 0:
+        return fallback
+
+    steps = start_idx + np.arange(values.size, dtype=np.float64)
+    initial = float(values[0])
+    final = float(values[-1])
+    delta = initial - final
+    slope = float(np.polyfit(steps, values, 1)[0]) if values.size >= 2 else 0.0
+    auc_norm = normalized_auc(values.tolist())
+    diffs = np.diff(values)
+    pos_improve_frac = float(np.mean(diffs < -pos_tol)) if diffs.size > 0 else 0.0
+    rel_improvement = delta / max(abs(initial), 1e-6)
+    return {
+        'initial': initial,
+        'final': final,
+        'delta': delta,
+        'slope': slope,
+        'auc_norm': auc_norm,
+        'pos_improve_frac': pos_improve_frac,
+        'relative_improvement': rel_improvement,
+    }
+
+
+# --- Helper: log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run ---
+def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix: str = 'eval_runs'):
+    """
+    Log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run directory.
+    """
+    rmse = list(metrics.get('rmse_series_mean') or [])
+    mae  = list(metrics.get('mae_series_mean')  or [])
+    w2   = list(metrics.get('w2_series_mean')   or [])
+    min_len = min(len(rmse), len(mae), len(w2))
+    if min_len == 0:
+        return
+
+    safe_name = "".join(c for c in str(run_name) if c.isalnum() or c in "-_.") or "eval"
+    run_dir = os.path.join(logdir, run_prefix, safe_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    writer = tf.summary.create_file_writer(run_dir)
+    with writer.as_default():
+        for i in range(min_len):
+            if not (np.isfinite(rmse[i]) and np.isfinite(mae[i]) and np.isfinite(w2[i])):
+                continue
+            tf.summary.scalar('curves/rmse', float(rmse[i]), step=i)
+            tf.summary.scalar('curves/mae',  float(mae[i]),  step=i)
+            tf.summary.scalar('curves/w2',   float(w2[i]),   step=i)
+    writer.flush()
+    writer.close()
+
+
+# --- Pretty-print evaluation metrics in a multi-line compact format
+def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = None, show_pos_fracs: bool = True, width: int = 80) -> None:
+    """
+    Pretty-print evaluation metrics in a consistent, compact multi-line format.
+    Uses tqdm.write to avoid clobbering progress bars.
+
+    Args:
+        metrics: dict returned by compute_eval.
+        header: label for the section (e.g., 'Eval', 'Heuristic Eval').
+        step: optional outer training step for display.
+        show_pos_fracs: whether to include PosImprove% summary line.
+        width: width of the dashed separators.
+    """
+    sep = "-" * max(20, width)
+    head = f"[{header} @ {step}]" if step is not None else f"[{header}]"
+    rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
+    mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
+    w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
+
+    tqdm.write(sep)
+    tqdm.write(head)
+    tqdm.write(
+        f"MAE  Δ={mae_summary['delta']:.4f} %={mae_summary['relative_improvement']:.2%} "
+        f"(init {mae_summary['initial']:.4f} → final {mae_summary['final']:.4f})"
+    )
+    tqdm.write(
+        f"RMSE Δ={rmse_summary['delta']:.4f} %={rmse_summary['relative_improvement']:.2%} "
+        f"(init {rmse_summary['initial']:.4f} → final {rmse_summary['final']:.4f})"
+    )
+    tqdm.write(
+        f"W2   Δ={w2_summary['delta']:.4f} %={w2_summary['relative_improvement']:.2%} "
+        f"(init {w2_summary['initial']:.4f} → final {w2_summary['final']:.4f})"
+    )
+    if show_pos_fracs:
+        tqdm.write(
+            f"PosImprove% — RMSE {rmse_summary['pos_improve_frac']:.2%} | "
+            f"MAE {mae_summary['pos_improve_frac']:.2%} | "
+            f"W2 {w2_summary['pos_improve_frac']:.2%}"
+        )
+    tqdm.write(sep)
 
 
 __all__ = [
@@ -447,4 +403,7 @@ __all__ = [
     'WASSERSTEIN_MAX_POINTS',
     'chamfer_distance',
     'earth_movers_distance',
+    'log_eval_metric_curves',
+    'print_eval_metrics',
+    'summarize_metric_series',
 ]

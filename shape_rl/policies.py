@@ -24,7 +24,9 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         self._depth_gain = 1.05
 
     def _single_action(self, diff_signed: np.ndarray) -> np.ndarray:
-        actual = diff_signed.astype(np.float32) * self._diff_scale
+        # Be robust to TF EagerTensor or NumPy inputs
+        diff_signed = diff_signed.numpy() if hasattr(diff_signed, "numpy") else diff_signed
+        actual = np.asarray(diff_signed, dtype=np.float32) * self._diff_scale
         diff_mod = actual.copy()
         r = self._r
         diff_mod[:r, :] = -np.inf
@@ -57,11 +59,20 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
 
     def _action(self, time_step, policy_state):
         obs = time_step.observation
-        if obs.ndim == 4:
-            batch_actions = [self._single_action(obs[i, ..., 0]) for i in range(obs.shape[0])]
+        # Convert to NumPy if coming from a TF env/time_step
+        if hasattr(obs, "numpy"):
+            obs_np = obs.numpy()
+        else:
+            try:
+                obs_np = np.asarray(obs)
+            except Exception:
+                # Fallback: leave as-is (PyEnvironment should already be NumPy)
+                obs_np = obs
+        if getattr(obs_np, "ndim", None) == 4:
+            batch_actions = [self._single_action(obs_np[i, ..., 0]) for i in range(obs_np.shape[0])]
             act = np.stack(batch_actions, axis=0)
         else:
-            act = self._single_action(obs[..., 0])
+            act = self._single_action(obs_np[..., 0])
         return policy_step.PolicyStep(act, policy_state, ())
 
 
