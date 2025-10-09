@@ -82,7 +82,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tgt_norm_buf = np.empty((H, W), dtype=np.float32)
         self._grad_buf     = np.empty((H, W), dtype=np.float32)  # |∇diff|
         self._lap_buf      = np.empty((H, W), dtype=np.float32)  # Δ diff
-        self._obs_buf      = np.empty((H, W, 6), dtype=np.float32)  # [diff, env, tgt, grad, lap, progress]
+        self._obs_buf      = np.empty((H, W, 5), dtype=np.float32)  # [diff, env, tgt, grad, lap]
 
         # ── SPECS ────────────────────────────────────────────────
         self._action_spec = array_spec.BoundedArraySpec(
@@ -93,7 +93,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             name='action'
         )
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(H, W, 6),
+            shape=(H, W, 5),
             dtype=np.float32,
             minimum=-1.0,
             maximum=1.0,
@@ -211,12 +211,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._obs_buf[..., 2] = self._tgt_norm_buf
         self._obs_buf[..., 3] = self._grad_buf
         self._obs_buf[..., 4] = self._lap_buf
-        err_ratio = 0.0
-        if np.isfinite(self._current_err_global):
-            err_ratio = self._current_err_global / (self._err0 + self._eps)
-        err_ratio = float(np.clip(err_ratio, 0.0, 1.0))
-        progress_plane = 2.0 * err_ratio - 1.0
-        self._obs_buf[..., 5].fill(progress_plane)
         return self._obs_buf
 
     # ------------------------------------------------------------------ #
