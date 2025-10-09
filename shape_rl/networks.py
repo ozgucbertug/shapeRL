@@ -267,6 +267,7 @@ class SpatialSoftmaxEncoder(layers.Layer):
         filters: tuple[int, ...] = (32, 64, 128),
         latent_dim: int = 128,
         return_feature_maps: bool = False,
+        use_heatmap: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -274,8 +275,13 @@ class SpatialSoftmaxEncoder(layers.Layer):
         for idx, f in enumerate(filters):
             stride = 1 if idx == 0 else 2
             self.blocks.append(_ConvBlock(f, stride=stride))
-        self.heatmap_head = layers.Conv2D(1, 1, padding='same')
-        self.spatial_softmax = SpatialSoftmax()
+        self._use_heatmap = use_heatmap
+        if self._use_heatmap:
+            self.heatmap_head = layers.Conv2D(1, 1, padding='same')
+            self.spatial_softmax = SpatialSoftmax()
+        else:
+            self.heatmap_head = None
+            self.spatial_softmax = None
         self.global_pool = layers.GlobalAveragePooling2D()
         self.latent = layers.Dense(latent_dim, activation='elu')
         self._return_feature_maps = return_feature_maps
@@ -288,8 +294,10 @@ class SpatialSoftmaxEncoder(layers.Layer):
         for block in self.blocks:
             x = block(x, training=training)
             feature_maps.append(x)
-        heatmap = self.heatmap_head(x)
-        xy = self.spatial_softmax(heatmap)
+        xy: tf.Tensor | None = None
+        if self._use_heatmap:
+            heatmap = self.heatmap_head(x)
+            xy = self.spatial_softmax(heatmap)
         latent = self.latent(self.global_pool(x))
         if self._return_feature_maps:
             if len(feature_maps) >= 2:
@@ -355,7 +363,7 @@ class SpatialSoftmaxCriticNetwork(network.Network):
 
     def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxCriticNetwork'):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
+        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True, use_heatmap=False)
         self.action_fc = layers.Dense(64, activation='relu')
         self.fc1 = layers.Dense(128, activation='relu')
         self.fc2 = layers.Dense(64, activation='relu')
