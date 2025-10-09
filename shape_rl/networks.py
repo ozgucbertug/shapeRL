@@ -304,9 +304,10 @@ class SpatialSoftmaxActorNetwork(network.Network):
     def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxActorNetwork'):
         super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
         self._action_spec = action_spec
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128)
-        self.fc1 = layers.Dense(128, activation='relu')
-        self.fc2 = layers.Dense(64, activation='relu')
+        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
+        self.fc1 = layers.Dense(128, activation='elu')
+        self.fc2 = layers.Dense(64, activation='elu')
+        self.depth_fc = layers.Dense(64, activation='elu')
         self.dz_head = layers.Dense(1)
         action_dims = action_spec.shape[0]
         self.mean_residual = layers.Dense(action_dims)
@@ -314,7 +315,10 @@ class SpatialSoftmaxActorNetwork(network.Network):
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
-        latent, xy = self.encoder(obs, training=training)
+        latent, xy, feature_maps = self.encoder(obs, training=training)
+        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
+        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
+        local_feat = tf.stop_gradient(local_feat)
         fused = tf.concat([latent, xy], axis=-1)
         fused = self.fc1(fused)
         fused = self.fc2(fused)
@@ -322,7 +326,9 @@ class SpatialSoftmaxActorNetwork(network.Network):
         xy_clipped = tf.clip_by_value(xy, 1e-3, 1.0 - 1e-3)
         xy_pre = tf.clip_by_value(2.0 * xy_clipped - 1.0, -0.999, 0.999)
         xy_base = tf.math.atanh(xy_pre)
-        dz_base = self.dz_head(fused)
+        depth_in = tf.concat([fused, local_feat], axis=-1)
+        depth_h = self.depth_fc(depth_in)
+        dz_base = self.dz_head(depth_h)
         base_mean = tf.concat([xy_base, dz_base], axis=-1)
         mean = base_mean + self.mean_residual(fused)
 
