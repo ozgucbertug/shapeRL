@@ -345,7 +345,7 @@ class SpatialSoftmaxActorNetwork(network.Network):
 
 
 class SpatialSoftmaxCriticNetwork(network.Network):
-    """Critic that shares the spatial-softmax encoder and compares xy predictions."""
+    """Critic that evaluates supplied action xy coordinates via bilinear sampling."""
 
     def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxCriticNetwork'):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
@@ -360,15 +360,19 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        latent, predicted_xy, feature_maps = self.encoder(obs, training=training)
+        latent, _, feature_maps = self.encoder(obs, training=training)
         xy = acts[..., :2]
         action_latent = self.action_fc(acts)
 
         local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
         local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
 
-        xy_delta = xy - predicted_xy
-        fused = tf.concat([latent, action_latent, xy_delta, local_feat], axis=-1)
+        diff = bilinear_sample_nhwc(obs[..., 0:1], xy)
+        grad = bilinear_sample_nhwc(obs[..., 3:4], xy)
+        lap = bilinear_sample_nhwc(obs[..., 4:5], xy)
+        sampled_scalars = tf.concat([diff, grad, lap], axis=-1)
+
+        fused = tf.concat([latent, action_latent, local_feat, sampled_scalars], axis=-1)
         fused = self.fc1(fused)
         fused = self.fc2(fused)
         q = self.q_head(fused)
