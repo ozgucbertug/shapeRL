@@ -295,10 +295,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         x = x_norm * (self._patch_width - 1)
         y = y_norm * (self._patch_height - 1)
 
-        # Derive absolute tip height from current surface, then push down by dz_norm
-        cy = int(np.clip(round(y), 0, self._patch_height - 1))
-        cx = int(np.clip(round(x), 0, self._patch_width - 1))
+        # Match the numba kernels: round-half-up and clamp center so the full tool footprint fits
+        r = self._tool_radius
+        cy_raw = int(np.floor(y + 0.5))
+        cx_raw = int(np.floor(x + 0.5))
+        cy = int(np.clip(cy_raw, r, self._patch_height - 1 - r))
+        cx = int(np.clip(cx_raw, r, self._patch_width  - 1 - r))
         h_center = float(self._env_map.map[cy, cx])
+        # The press semantics are: tip starts at the local surface and moves down by dz_rel
         z_abs = h_center
         dz_rel = dz_norm * (self.max_push_mult * self._tool_radius)
 

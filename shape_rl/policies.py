@@ -8,7 +8,10 @@ from tf_agents.trajectories import policy_step
 
 
 class HeuristicPressPolicy(py_policy.PyPolicy):
-    """Greedy one-step policy based on the diff channel."""
+    """Greedy one-step policy based on the diff channel.
+
+    Depth is computed from the normalized diff channel directly (scale-free) instead of multiplying by amplitude.
+    """
 
     def __init__(self, time_step_spec, action_spec,
                  width: int, height: int, tool_radius: int, amp_max: float, max_push_mult: float = 1.0):
@@ -20,13 +23,12 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         self._max_push_mult = max_push_mult
         self._max_depth = self._max_push_mult * tool_radius
         self._inv_depth = 1.0 / max(self._max_depth, 1e-6)
-        self._diff_scale = self._amp_max * 0.5
-        self._depth_gain = 1.05
+        self._depth_gain = 1.05  # small overshoot on normalized diff.
 
     def _single_action(self, diff_signed: np.ndarray) -> np.ndarray:
         # Be robust to TF EagerTensor or NumPy inputs
         diff_signed = diff_signed.numpy() if hasattr(diff_signed, "numpy") else diff_signed
-        actual = np.asarray(diff_signed, dtype=np.float32) * self._diff_scale
+        actual = np.asarray(diff_signed, dtype=np.float32)
         diff_mod = actual.copy()
         r = self._r
         diff_mod[:r, :] = -np.inf
@@ -51,9 +53,12 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         peak = actual[cy, cx]
         if not np.isfinite(peak):
             peak = 0.0
-        depth = max(0.0, peak * self._depth_gain)
-        depth = float(np.clip(depth, 0.0, self._max_depth))
-        dz_norm = float(np.clip(depth * self._inv_depth, 0.0, 1.0))
+        peak_pos = max(0.0, float(peak))
+        # Map directly to normalized depth: depth_norm in [0,1]
+        depth_norm = float(np.clip(self._depth_gain * peak_pos, 0.0, 1.0))
+        # Convert to absolute depth for clarity (not actually needed for the action)
+        depth = depth_norm * self._max_depth
+        dz_norm = depth_norm
 
         return np.array([x_norm, y_norm, dz_norm], dtype=np.float32)
 
