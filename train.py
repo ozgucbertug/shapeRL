@@ -27,7 +27,7 @@ class TrainingConfig:
     debug: bool = False
     env_debug: bool = True
     log_interval: int = 1_000
-    num_eval_episodes: int = 5
+    num_eval_episodes: int = 1
     eval_interval: int = 5_000
     log_eval_curves: bool = True
 
