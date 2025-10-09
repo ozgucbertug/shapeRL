@@ -373,39 +373,37 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ---------------------------------------------------- #
     #  Reward (potential-based shaping)                    #
     # ---------------------------------------------------- #
-    def _compute_reward(
-        self,
-        err_g_before: float,
-        err_g_after:  float,
-        err_l_before: float,
-        err_l_after:  float,
-        removed: float,
-    ) -> float:
-        base_scale = self._err0 + self._eps
+    def _compute_reward(self,
+                        err_g_before: float, err_g_after: float,
+                        err_l_before: float, err_l_after: float,
+                        removed: float) -> float:
+        # --- Relative improvements (scale-free) ---
+        rel_g = (err_g_before - err_g_after) / max(err_g_before, self._eps)
+        rel_l = (err_l_before - err_l_after) / max(err_l_before, self._eps)
+        rel_g = float(np.clip(rel_g, -1.0, 1.0))
+        rel_l = float(np.clip(rel_l, -1.0, 1.0))
+        improve = self._global_weight * rel_g + self._local_weight * rel_l
 
-        global_term = (err_g_before - err_g_after) / base_scale
-        global_term = float(np.clip(global_term, -1.0, 1.0))
+        # --- Gentle volume regularizer (normalized) ---
+        removed_norm = removed / (self._max_press_volume + self._eps)
+        vol_pen = self._volume_penalty_coeff * removed_norm
 
-        local_term = (err_l_before - err_l_after) / base_scale
-        local_term = float(np.clip(local_term, -1.0, 1.0))
+        # --- Per-step cost (kept small/unconditional here) ---
+        step_pen = self._step_cost
 
-        vol_norm = removed / (self._max_press_volume + self._eps)
-        vol_norm = float(np.clip(vol_norm, 0.0, 2.0))
+        reward = improve - vol_pen - step_pen
 
-        reward = (
-            self._global_weight * global_term
-            + self._local_weight * local_term
-            - self._volume_penalty_coeff * vol_norm
-            - self._step_cost
-        )
-
-        reward = float(np.clip(reward, -5.0, 5.0))
-        self._last_reward_terms = {
-            "global_term": global_term,
-            "local_term": local_term,
-            "volume_norm": vol_norm,
-            "volume_penalty": self._volume_penalty_coeff * vol_norm,
-            "step_cost": self._step_cost,
-            "reward": reward,
-        }
-        return reward
+        if self.debug:
+            self._last_reward_terms = {
+                'rel_g': rel_g,
+                'rel_l': rel_l,
+                'improve': improve,
+                'removed_norm': float(removed_norm),
+                'vol_pen': float(vol_pen),
+                'step_pen': float(step_pen),
+            }
+            self._last_reward = float(reward)
+            self._last_err_global = float(err_g_after)
+            self._last_err_local = float(err_l_after)
+            self._last_rel_improve = float(improve)
+        return float(reward)
