@@ -26,9 +26,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         fail_penalty: float = -1.0,
         terminate_on_success: bool = True,
         fail_on_breach: bool = True,
-        # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
-        volume_penalty_coeff: float = 3e-4,
-        no_touch_penalty: float = 0.02,
         # ── MISC / DEBUG ──────────────────────────────────────────
         debug: bool = False,
         seed: int | None = None,
@@ -68,8 +65,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._fail_on_breach       = fail_on_breach
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
-        self._volume_penalty_coeff = volume_penalty_coeff
-        self._step_cost            = float(no_touch_penalty)  # per-action cost to discourage dithering
+        self._volume_penalty_coeff = 3e-4
         self._eps                  = 1e-6
         self._global_weight        = 0.7
         self._local_weight         = 0.3
@@ -384,14 +380,16 @@ class SandShapingEnv(py_environment.PyEnvironment):
         rel_l = float(np.clip(rel_l, -1.0, 1.0))
         improve = self._global_weight * rel_g + self._local_weight * rel_l
 
-        # --- Gentle volume regularizer (normalized) ---
+        # --- Gentle, sign-aware volume shaping (normalized) ---
         removed_norm = removed / (self._max_press_volume + self._eps)
-        vol_pen = self._volume_penalty_coeff * removed_norm
+        removed_norm = float(np.clip(removed_norm, 0.0, 1.0))
 
-        # --- Per-step cost (kept small/unconditional here) ---
-        step_pen = self._step_cost
+        gain = max(improve, 0.0)
+        loss = max(-improve, 0.0)
+        pos_bonus = self._volume_penalty_coeff * removed_norm * gain
+        neg_pen   = 2.0 * self._volume_penalty_coeff * removed_norm * loss  # asymmetric, stronger when harming
 
-        reward = improve - vol_pen - step_pen
+        reward = improve + pos_bonus - neg_pen
 
         if self.debug:
             self._last_reward_terms = {
@@ -399,8 +397,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
                 'rel_l': rel_l,
                 'improve': improve,
                 'removed_norm': float(removed_norm),
-                'vol_pen': float(vol_pen),
-                'step_pen': float(step_pen),
+                'pos_bonus': float(pos_bonus),
+                'neg_pen': float(neg_pen),
             }
             self._last_reward = float(reward)
             self._last_err_global = float(err_g_after)
