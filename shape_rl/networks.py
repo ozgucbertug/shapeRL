@@ -7,6 +7,59 @@ from keras import layers, models
 from tf_agents.networks import network
 import tensorflow_probability as tfp
 
+def bilinear_sample_nhwc(feat: tf.Tensor, xy01: tf.Tensor) -> tf.Tensor:
+    """Samples per-location features from an NHWC map using normalized coords.
+
+    Args:
+        feat: Feature map tensor of shape [B, H, W, C].
+        xy01: Continuous coordinates in [0, 1] with shape [B, 2] ordered as (x, y).
+
+    Returns:
+        Tensor of shape [B, C] with bilinearly interpolated features.
+    """
+    feat = tf.convert_to_tensor(feat)
+    xy01 = tf.convert_to_tensor(xy01)
+
+    batch_size = tf.shape(feat)[0]
+    height = tf.shape(feat)[1]
+    width = tf.shape(feat)[2]
+
+    x = tf.clip_by_value(xy01[..., 0], 0.0, 1.0) * (tf.cast(width, tf.float32) - 1.0)
+    y = tf.clip_by_value(xy01[..., 1], 0.0, 1.0) * (tf.cast(height, tf.float32) - 1.0)
+
+    x0 = tf.cast(tf.floor(x), tf.int32)
+    y0 = tf.cast(tf.floor(y), tf.int32)
+    x1 = tf.minimum(x0 + 1, width - 1)
+    y1 = tf.minimum(y0 + 1, height - 1)
+
+    def _gather(h: tf.Tensor, w: tf.Tensor) -> tf.Tensor:
+        idx = tf.stack([tf.range(batch_size), h, w], axis=-1)
+        return tf.gather_nd(feat, idx)
+
+    Ia = _gather(y0, x0)
+    Ib = _gather(y0, x1)
+    Ic = _gather(y1, x0)
+    Id = _gather(y1, x1)
+
+    x = tf.cast(x, tf.float32)
+    y = tf.cast(y, tf.float32)
+    x0f = tf.cast(x0, tf.float32)
+    y0f = tf.cast(y0, tf.float32)
+    x1f = tf.cast(x1, tf.float32)
+    y1f = tf.cast(y1, tf.float32)
+
+    wa = (x1f - x) * (y1f - y)
+    wb = (x - x0f) * (y1f - y)
+    wc = (x1f - x) * (y - y0f)
+    wd = (x - x0f) * (y - y0f)
+
+    wa = tf.expand_dims(wa, axis=-1)
+    wb = tf.expand_dims(wb, axis=-1)
+    wc = tf.expand_dims(wc, axis=-1)
+    wd = tf.expand_dims(wd, axis=-1)
+
+    return wa * Ia + wb * Ib + wc * Ic + wd * Id
+
 
 # ==========================================================================
 #  Feature Pyramid Encoder utilities
@@ -207,7 +260,13 @@ class _ConvBlock(layers.Layer):
 class SpatialSoftmaxEncoder(layers.Layer):
     """CNN backbone that predicts a spatial expectation alongside a latent vector."""
 
-    def __init__(self, filters: tuple[int, ...] = (32, 64, 128), latent_dim: int = 128, **kwargs):
+    def __init__(
+        self,
+        filters: tuple[int, ...] = (32, 64, 128),
+        latent_dim: int = 128,
+        return_feature_maps: bool = False,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.blocks = []
         for idx, f in enumerate(filters):
@@ -217,14 +276,25 @@ class SpatialSoftmaxEncoder(layers.Layer):
         self.spatial_softmax = SpatialSoftmax()
         self.global_pool = layers.GlobalAveragePooling2D()
         self.latent = layers.Dense(latent_dim, activation='relu')
+        self._return_feature_maps = return_feature_maps
 
-    def call(self, inputs: tf.Tensor, training: bool | None = None) -> tuple[tf.Tensor, tf.Tensor]:
+    def call(
+        self, inputs: tf.Tensor, training: bool | None = None
+    ) -> tuple[tf.Tensor, tf.Tensor] | tuple[tf.Tensor, tf.Tensor, tuple[tf.Tensor, ...]]:
         x = tf.cast(inputs, tf.float32)
+        feature_maps: list[tf.Tensor] = []
         for block in self.blocks:
             x = block(x, training=training)
+            feature_maps.append(x)
         heatmap = self.heatmap_head(x)
         xy = self.spatial_softmax(heatmap)
         latent = self.latent(self.global_pool(x))
+        if self._return_feature_maps:
+            if len(feature_maps) >= 2:
+                maps = (feature_maps[-2], feature_maps[-1])
+            else:
+                maps = (feature_maps[-1],)
+            return latent, xy, maps
         return latent, xy
 
 
@@ -273,7 +343,7 @@ class SpatialSoftmaxCriticNetwork(network.Network):
 
     def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxCriticNetwork'):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128)
+        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
         self.action_fc = layers.Dense(64, activation='relu')
         self.fc1 = layers.Dense(128, activation='relu')
         self.fc2 = layers.Dense(64, activation='relu')
@@ -284,10 +354,15 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        latent, predicted_xy = self.encoder(obs, training=training)
+        latent, predicted_xy, feature_maps = self.encoder(obs, training=training)
+        xy = acts[..., :2]
         action_latent = self.action_fc(acts)
-        xy_delta = acts[..., :2] - predicted_xy
-        fused = tf.concat([latent, action_latent, xy_delta], axis=-1)
+
+        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
+        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
+
+        xy_delta = xy - predicted_xy
+        fused = tf.concat([latent, action_latent, xy_delta, local_feat], axis=-1)
         fused = self.fc1(fused)
         fused = self.fc2(fused)
         q = self.q_head(fused)
