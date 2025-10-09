@@ -140,10 +140,12 @@ def train(
     encoder_label = encoder_type
     if encoder_type == 'fpn':
         actor_net = FPNActorNetwork(observation_spec, action_spec)
-        critic_net = FPNCriticNetwork(observation_spec, action_spec)
+        critic_net_1 = FPNCriticNetwork(observation_spec, action_spec, name='FPNCriticNetwork_1')
+        critic_net_2 = FPNCriticNetwork(observation_spec, action_spec, name='FPNCriticNetwork_2')
     elif encoder_type == 'spatial_softmax':
         actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
-        critic_net = SpatialSoftmaxCriticNetwork(observation_spec, action_spec)
+        critic_net_1 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1')
+        critic_net_2 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2')
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
         actor_net = actor_distribution_network.ActorDistributionNetwork(
@@ -152,13 +154,21 @@ def train(
             conv_layer_params=conv_params,
             fc_layer_params=(256, 128),
         )
-        critic_net = CriticNetwork(
+        critic_net_1 = CriticNetwork(
             input_tensor_spec=(observation_spec, action_spec),
             observation_conv_layer_params=conv_params,
             observation_fc_layer_params=None,
             action_fc_layer_params=None,
             joint_fc_layer_params=(256, 128),
-            name='critic_network'
+            name='critic_network_1'
+        )
+        critic_net_2 = CriticNetwork(
+            input_tensor_spec=(observation_spec, action_spec),
+            observation_conv_layer_params=conv_params,
+            observation_fc_layer_params=None,
+            action_fc_layer_params=None,
+            joint_fc_layer_params=(256, 128),
+            name='critic_network_2'
         )
         encoder_label = "CNN"
     else:
@@ -170,7 +180,8 @@ def train(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
         actor_network=actor_net,
-        critic_network=critic_net,
+        critic_network=critic_net_1,
+        critic_network_2=critic_net_2,
         actor_optimizer=Adam(learning_rate, clipnorm=1.0),
         critic_optimizer=Adam(learning_rate, clipnorm=1.0),
         alpha_optimizer=Adam(learning_rate, clipnorm=1.0),
