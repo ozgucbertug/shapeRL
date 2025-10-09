@@ -243,12 +243,14 @@ class FPNCriticNetwork(network.Network):
 
 
 class _ConvBlock(layers.Layer):
-    """Conv-BN-ReLU block with configurable stride."""
+    """Conv-GN-ReLU block with configurable stride."""
 
     def __init__(self, filters: int, stride: int = 1, **kwargs):
         super().__init__(**kwargs)
         self.conv = layers.Conv2D(filters, 3, strides=stride, padding='same')
-        self.norm = layers.BatchNormalization()
+        # Use GN with groups chosen by channel count
+        groups = 16 if filters >= 64 else (8 if filters >= 32 else 4)
+        self.norm = layers.GroupNormalization(groups=groups, axis=-1, epsilon=1e-5)
         self.act = layers.Activation('relu')
 
     def call(self, inputs: tf.Tensor, training: bool | None = None) -> tf.Tensor:
@@ -275,7 +277,7 @@ class SpatialSoftmaxEncoder(layers.Layer):
         self.heatmap_head = layers.Conv2D(1, 1, padding='same')
         self.spatial_softmax = SpatialSoftmax()
         self.global_pool = layers.GlobalAveragePooling2D()
-        self.latent = layers.Dense(latent_dim, activation='relu')
+        self.latent = layers.Dense(latent_dim, activation='elu')
         self._return_feature_maps = return_feature_maps
 
     def call(
