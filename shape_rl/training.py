@@ -282,10 +282,6 @@ def train(
     if initial_collect_steps is None:
         initial_collect_steps = max(batch_size * 2, collect_steps_per_update * num_parallel_envs * 4)
 
-    warmup_mode = 'heuristic' if use_heuristic_warmup else 'random'
-    tqdm.write(
-        f"[Warmup] Starting {warmup_mode} warm-up for {initial_collect_steps} transitions"
-    )
     warmup_start = time.perf_counter()
 
     warmup_rewards = [] if (debug and use_heuristic_warmup) else None
