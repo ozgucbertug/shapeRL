@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import tensorflow as tf
 from keras import layers, models
 from tf_agents.networks import network
@@ -158,22 +159,58 @@ class FPNEncoder(layers.Layer):
 
 
 class SpatialSoftmax(layers.Layer):
-    """Computes spatial expectation for heatmap logits."""
+    """Computes spatial expectation for heatmap logits.
+
+    Lower temperatures sharpen the softmax distribution, while higher temperatures
+    produce smoother, more diffuse expectations.
+    """
+
+    def __init__(self, temperature: float = 1.0, learnable: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        if temperature <= 0.0:
+            raise ValueError("temperature must be positive.")
+        # Parameterize temperature via softplus(log_temperature) for positivity
+        initial_log_temp = math.log(math.expm1(float(temperature)))
+        self._log_temperature = self.add_weight(
+            name='log_temperature',
+            shape=(),
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.Constant(initial_log_temp),
+            trainable=learnable,
+        )
+        self._initial_temperature = float(temperature)
+        self._learnable = bool(learnable)
 
     def call(self, logits: tf.Tensor) -> tf.Tensor:
+        logits = tf.cast(logits, tf.float32)
         shape = tf.shape(logits)
         batch = shape[0]
         height = shape[1]
         width = shape[2]
 
         flat = tf.reshape(logits, [batch, height * width])
-        weights = tf.nn.softmax(flat)
+        temperature = tf.nn.softplus(self._log_temperature)
+        scaled = flat / temperature
+        # Stabilize softmax by subtracting per-batch max
+        max_per_batch = tf.reduce_max(scaled, axis=-1, keepdims=True)
+        normalized = scaled - max_per_batch
+        weights = tf.nn.softmax(normalized)
 
         xs = tf.linspace(0.0, 1.0, width)
         ys = tf.linspace(0.0, 1.0, height)
         grid_x, grid_y = tf.meshgrid(xs, ys)
         coords = tf.stack([tf.reshape(grid_x, [-1]), tf.reshape(grid_y, [-1])], axis=-1)
         return tf.matmul(weights, coords)
+
+    def get_config(self):
+        config = super().get_config()
+        config.update(
+            {
+                'temperature': self._initial_temperature,
+                'learnable': self._learnable,
+            }
+        )
+        return config
 
 
 # ==========================================================================
