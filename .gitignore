@@ -163,6 +163,7 @@ cython_debug/
 .DS_Store
 /visuals
 /logs
+/logs_archive
 /util
 /ckpts
 /policies
