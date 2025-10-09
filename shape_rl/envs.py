@@ -45,12 +45,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._amp_max = self._amplitude_range[1]
         # scaling for obs
         self._inv_scale_d = 2.0 / self._amp_max   # diff/grad/lap
-        self._inv_scale_h = 1.0 / self._amp_max   # heights
 
         # Per-episode robust scales for diff/grad/lap
         self._s_diff = 1.0
         self._s_grad = 1.0
         self._s_lap  = 1.0
+        self._s_env_h = 1.0
+        self._s_tgt_h = 1.0
 
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
@@ -191,12 +192,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # 1: env height normalized by running mean
         np.subtract(h, self._env_map._mean, out=self._env_norm_buf)
-        self._env_norm_buf *= self._inv_scale_h
+        scale_env = self._s_env_h if self._s_env_h > self._eps else 1.0
+        np.divide(self._env_norm_buf, scale_env, out=self._env_norm_buf)
         np.clip(self._env_norm_buf, -1.0, 1.0, out=self._env_norm_buf)
 
         # 2: target height normalized by per-episode mean
         np.subtract(t, self._tgt_mean, out=self._tgt_norm_buf)
-        self._tgt_norm_buf *= self._inv_scale_h
+        scale_tgt = self._s_tgt_h if self._s_tgt_h > self._eps else 1.0
+        np.divide(self._tgt_norm_buf, scale_tgt, out=self._tgt_norm_buf)
         np.clip(self._tgt_norm_buf, -1.0, 1.0, out=self._tgt_norm_buf)
 
         # 3–4: gradient magnitude & Laplacian of raw diff
@@ -252,6 +255,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         diff = self._env_map.difference(self._target_map, out=self._work_diff)
         h = self._env_map.map
         t = self._target_map.map
+
+        env_centered = h - self._env_map._mean
+        tgt_centered = t - self._tgt_mean
+        self._s_env_h = float(max(self._eps, np.percentile(np.abs(env_centered), 95.0)))
+        self._s_tgt_h = float(max(self._eps, np.percentile(np.abs(tgt_centered), 95.0)))
 
         # --- Per-episode robust scales for diff/grad/lap (95th percentile) ---
         abs_diff = np.abs(diff)
