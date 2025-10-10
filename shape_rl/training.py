@@ -194,6 +194,19 @@ def train(
     )
     tf_agent.initialize()
 
+    def log_spatialsoftmax_temperature(step_val: int):
+        if encoder_type == 'spatial_softmax':
+            try:
+                temp_t = actor_net.current_temperature()
+            except AttributeError:
+                temp_t = None
+            if temp_t is not None:
+                try:
+                    temp_val = float(tf.reduce_mean(temp_t).numpy())
+                    tf.summary.scalar('model/spatialsoftmax_temperature', temp_val, step=step_val)
+                except Exception:
+                    pass
+
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
@@ -424,6 +437,15 @@ def train(
                     tf.summary.scalar('train/lap_rmse',
                                       float(np.mean(step_lap)), step=update)
 
+                # Track spatial-softmax temperature every step when debugging
+                if encoder_type == 'spatial_softmax':
+                    try:
+                        temp_t = actor_net.current_temperature()
+                        if temp_t is not None:
+                            tf.summary.scalar('train/spatialsoftmax_temperature_step', tf.reduce_mean(temp_t), step=update)
+                    except Exception:
+                        pass
+
                 reward_terms: dict[str, list[float]] = {}
                 for env in python_envs:
                     terms = getattr(env, '_last_reward_terms', None)
@@ -492,6 +514,9 @@ def train(
                     loss_components.append(f"replay={buffer_fill}")
                 except Exception:
                     pass
+
+                # Log learned SpatialSoftmax temperature (if applicable)
+                log_spatialsoftmax_temperature(update)
 
                 metrics_str = ' '.join(loss_components)
                 tqdm.write(

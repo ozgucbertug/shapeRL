@@ -159,27 +159,63 @@ class FPNEncoder(layers.Layer):
 
 
 class SpatialSoftmax(layers.Layer):
-    """Computes spatial expectation for heatmap logits.
+    """Computes spatial expectation for heatmap logits with bounded temperature.
 
     Lower temperatures sharpen the softmax distribution, while higher temperatures
-    produce smoother, more diffuse expectations.
+    produce smoother, more diffuse expectations. Temperature is constrained to a
+    configurable range via a sigmoid, to avoid degenerate over-sharp or over-diffuse
+    regimes while remaining fully differentiable.
     """
 
-    def __init__(self, temperature: float = 1.0, learnable: bool = True, **kwargs):
+    def __init__(
+        self,
+        temperature: float = 1.0,
+        learnable: bool = True,
+        min_temperature: float = 0.2,
+        max_temperature: float = 3.0,
+        reg_coeff: float = 0.0,
+        target_temperature: float | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
-        if temperature <= 0.0:
-            raise ValueError("temperature must be positive.")
-        # Parameterize temperature via softplus(log_temperature) for positivity
-        initial_log_temp = math.log(math.expm1(float(temperature)))
-        self._log_temperature = self.add_weight(
-            name='log_temperature',
+        if min_temperature <= 0.0:
+            raise ValueError("min_temperature must be positive.")
+        if not (min_temperature < max_temperature):
+            raise ValueError("min_temperature must be < max_temperature.")
+        # Clamp the requested initial temperature to bounds
+        t0 = float(temperature)
+        tmin = float(min_temperature)
+        tmax = float(max_temperature)
+        t0 = min(max(t0, tmin), tmax)
+        # Inverse of: T = Tmin + (Tmax-Tmin) * sigmoid(alpha)
+        ratio = (t0 - tmin) / (tmax - tmin + 1e-12)
+        ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
+        initial_alpha = math.log(ratio / (1.0 - ratio))
+
+        # Unconstrained parameter that we squash into [Tmin, Tmax]
+        self._temp_alpha = self.add_weight(
+            name='temp_alpha',
             shape=(),
             dtype=tf.float32,
-            initializer=tf.keras.initializers.Constant(initial_log_temp),
-            trainable=learnable,
+            initializer=tf.keras.initializers.Constant(initial_alpha),
+            trainable=bool(learnable),
         )
-        self._initial_temperature = float(temperature)
+        self._tmin = tmin
+        self._tmax = tmax
+        self._initial_temperature = t0
         self._learnable = bool(learnable)
+        self._reg_coeff = float(reg_coeff)
+        # If None, regularize toward mid-range temperature
+        self._target_temperature = float(target_temperature) if target_temperature is not None else None
+
+    def _current_temperature(self) -> tf.Tensor:
+        # Differentiable mapping into [Tmin, Tmax]
+        p = tf.nn.sigmoid(self._temp_alpha)
+        return self._tmin + (self._tmax - self._tmin) * p
+
+    def current_temperature(self) -> tf.Tensor:
+        """Public accessor for the current (bounded) temperature tensor."""
+        return tf.identity(self._current_temperature(), name="spatialsoftmax_temperature")
 
     def call(self, logits: tf.Tensor) -> tf.Tensor:
         logits = tf.cast(logits, tf.float32)
@@ -189,12 +225,25 @@ class SpatialSoftmax(layers.Layer):
         width = shape[2]
 
         flat = tf.reshape(logits, [batch, height * width])
-        temperature = tf.nn.softplus(self._log_temperature)
+        temperature = self._current_temperature()
         scaled = flat / temperature
         # Stabilize softmax by subtracting per-batch max
         max_per_batch = tf.reduce_max(scaled, axis=-1, keepdims=True)
         normalized = scaled - max_per_batch
         weights = tf.nn.softmax(normalized)
+
+        # Optional gentle regularization to discourage extreme temperatures
+        if self._reg_coeff > 0.0:
+            target_T = (
+                tf.constant(0.5 * (self._tmin + self._tmax), dtype=tf.float32)
+                if self._target_temperature is None
+                else tf.constant(float(self._target_temperature), dtype=tf.float32)
+            )
+            # Normalize by range so the magnitude is consistent across settings
+            rng = tf.constant(self._tmax - self._tmin, dtype=tf.float32)
+            reg = ((temperature - target_T) / (rng + 1e-12)) ** 2
+            # Add as a per-batch mean to layer losses
+            self.add_loss(self._reg_coeff * tf.reduce_mean(reg))
 
         xs = tf.linspace(0.0, 1.0, width)
         ys = tf.linspace(0.0, 1.0, height)
@@ -208,6 +257,12 @@ class SpatialSoftmax(layers.Layer):
             {
                 'temperature': self._initial_temperature,
                 'learnable': self._learnable,
+                'min_temperature': self._tmin,
+                'max_temperature': self._tmax,
+                'reg_coeff': self._reg_coeff,
+                'target_temperature': (
+                    float(self._target_temperature) if self._target_temperature is not None else None
+                ),
             }
         )
         return config
@@ -297,6 +352,10 @@ class _ConvBlock(layers.Layer):
 
 
 class SpatialSoftmaxEncoder(layers.Layer):
+    def current_temperature(self) -> tf.Tensor | None:
+        if self._use_heatmap and self.spatial_softmax is not None:
+            return self.spatial_softmax.current_temperature()
+        return None
     """CNN backbone that predicts a spatial expectation alongside a latent vector."""
 
     def __init__(
@@ -346,6 +405,8 @@ class SpatialSoftmaxEncoder(layers.Layer):
 
 
 class SpatialSoftmaxActorNetwork(network.Network):
+    def current_temperature(self) -> tf.Tensor | None:
+        return self.encoder.current_temperature()
     """Actor that anchors xy means using a spatial softmax heatmap."""
 
     def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxActorNetwork'):
