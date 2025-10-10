@@ -17,12 +17,12 @@ from dataclasses import dataclass
 class TrainingConfig:
     seed: int | None = None
     encoder_type: str = 'spatial_k'
-    num_updates: int = 250_000
+    num_updates: int = 300_000
     num_parallel_envs: int = 64
     collect_steps_per_update: int = 4
     batch_size: int = 256
     use_heuristic_warmup: bool = True
-    initial_collect_steps: int | None = 2**17
+    initial_collect_steps: int | None = 2**18
     replay_capacity_total: int | None = 2**19
     debug: bool = False
     env_debug: bool = True
@@ -30,7 +30,7 @@ class TrainingConfig:
     num_eval_episodes: int = 1
     eval_interval: int = 5_000
     log_eval_curves: bool = True
-    checkpoint_interval: int | None = 50_000
+    checkpoint_interval: int | None = 5_000
 
 
 # Edit these defaults to change training behaviour without touching library code.

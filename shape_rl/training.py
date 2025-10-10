@@ -84,7 +84,7 @@ def train(
         target_total_replay = max(4096 * 4, batch_size * 64)
     replay_buffer_capacity = max(1, math.ceil(target_total_replay / env_divisor))
     total_replay_capacity = replay_buffer_capacity * env_divisor
-    learning_rate = 3e-4
+    learning_rate = 1e-4
     gamma = 0.99
     tqdm.write(
         "[Init] Derived hyperparameters — "
@@ -261,7 +261,7 @@ def train(
     os.makedirs(periodic_checkpoint_dir, exist_ok=True)
     periodic_checkpointer = common_utils.Checkpointer(
         ckpt_dir=periodic_checkpoint_dir,
-        max_to_keep=5,
+        max_to_keep=10,
         agent=tf_agent,
         global_step=global_step,
     )
