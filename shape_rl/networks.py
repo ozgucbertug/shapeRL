@@ -387,18 +387,16 @@ class SpatialKActorNetwork(network.Network):
         logits = tf.cast(logits, tf.float32)
         tau = tf.cast(tau, tf.float32)
 
-        def sample() -> tf.Tensor:
-            uniform = tf.random.uniform(tf.shape(logits), minval=0.0, maxval=1.0)
-            gumbel = -tf.math.log(-tf.math.log(uniform + 1e-8) + 1e-8)
-            y_soft = tf.nn.softmax((logits + gumbel) / tau, axis=-1)
-            y_hard = tf.one_hot(tf.argmax(y_soft, axis=-1), depth=self._K, dtype=tf.float32)
-            return y_hard + tf.stop_gradient(y_soft - y_hard)
+        training_mask = tf.cast(training_flag, tf.float32)
+        uniform = tf.random.uniform(tf.shape(logits), minval=1e-6, maxval=1.0 - 1e-6, dtype=tf.float32)
+        gumbel = -tf.math.log(-tf.math.log(uniform))
+        gumbel *= training_mask
 
-        def deterministic() -> tf.Tensor:
-            return tf.one_hot(tf.argmax(logits, axis=-1), depth=self._K, dtype=tf.float32)
+        y_soft = tf.nn.softmax((logits + gumbel) / tau, axis=-1)
+        y_hard = tf.one_hot(tf.argmax(y_soft, axis=-1), depth=self._K, dtype=tf.float32)
+        y_train = y_hard + tf.stop_gradient(y_soft - y_hard)
 
-        training_flag = tf.cast(training_flag, tf.bool)
-        return tf.cond(training_flag, sample, deterministic)
+        return training_mask * y_train + (1.0 - training_mask) * y_hard
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
@@ -420,11 +418,7 @@ class SpatialKActorNetwork(network.Network):
         gating_logits = self.gating_head(gating_hidden)
 
         training_flag = tf.convert_to_tensor(training if training is not None else False, dtype=tf.bool)
-        tau = tf.cond(
-            training_flag,
-            lambda: tf.constant(0.7, dtype=tf.float32),
-            lambda: tf.constant(0.1, dtype=tf.float32),
-        )
+        tau = tf.constant(0.1, dtype=tf.float32) + tf.cast(training_flag, tf.float32) * 0.6
         mode_weights = self._gumbel_onehot(gating_logits, tau, training_flag)
 
         probs = tf.nn.softmax(gating_logits, axis=-1)
