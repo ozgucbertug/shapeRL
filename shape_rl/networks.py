@@ -334,9 +334,154 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         return tf.squeeze(q, axis=-1), network_state
 
 
+class SpatialKActorNetwork(network.Network):
+    """Multi-modal spatial actor with straight-through Gumbel gating over K heatmaps."""
+
+    def __init__(self, observation_spec, action_spec, K: int = 4, name: str = 'SpatialKActor'):
+        super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
+        if K <= 0:
+            raise ValueError('Number of modes K must be positive.')
+        if action_spec.shape.rank != 1 or action_spec.shape[0] != 3:
+            raise ValueError('SpatialKActorNetwork expects action spec with shape [3].')
+        self._K = int(K)
+
+        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True, use_heatmap=False)
+        self.heatmap_head = layers.Conv2D(self._K, 1, padding='same', name='mixture_heatmap_head')
+        self.spatial_softmax = SpatialSoftmax()
+
+        self.gating_gap = layers.GlobalAveragePooling2D()
+        self.gating_fc1 = layers.Dense(128, activation='elu', name='gating_fc1')
+        self.gating_fc2 = layers.Dense(64, activation='elu', name='gating_fc2')
+        self.gating_head = layers.Dense(self._K, name='mode_logits')
+
+        self.xy_res_fc1 = layers.Dense(128, activation='elu', name='xy_res_fc1')
+        self.xy_res_fc2 = layers.Dense(64, activation='elu', name='xy_res_fc2')
+        self.xy_res_head = layers.Dense(2, name='xy_residual_head')
+
+        self.dz_hidden = layers.Dense(64, activation='elu', name='dz_hidden')
+        self.dz_mean_head = layers.Dense(self._K, name='dz_mean_head')
+        self.dz_logstd_head = layers.Dense(self._K, name='dz_logstd_head')
+
+        self._xy_logstd = self.add_weight(
+            name='xy_logstd',
+            shape=(),
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.Constant(-0.7),
+            trainable=True,
+        )
+        self._dz_logstd_bias = self.add_weight(
+            name='dz_logstd_bias',
+            shape=(),
+            dtype=tf.float32,
+            initializer=tf.keras.initializers.Constant(-1.0),
+            trainable=True,
+        )
+        self._bijector = tfp.bijectors.Chain(
+            [tfp.bijectors.Shift(0.5), tfp.bijectors.Scale(0.5), tfp.bijectors.Tanh()]
+        )
+
+    def current_temperature(self) -> tf.Tensor | None:
+        return self.spatial_softmax.current_temperature()
+
+    def _gumbel_onehot(self, logits: tf.Tensor, tau: tf.Tensor, training_flag: tf.Tensor) -> tf.Tensor:
+        logits = tf.cast(logits, tf.float32)
+        tau = tf.cast(tau, tf.float32)
+
+        def sample() -> tf.Tensor:
+            uniform = tf.random.uniform(tf.shape(logits), minval=0.0, maxval=1.0)
+            gumbel = -tf.math.log(-tf.math.log(uniform + 1e-8) + 1e-8)
+            y_soft = tf.nn.softmax((logits + gumbel) / tau, axis=-1)
+            y_hard = tf.one_hot(tf.argmax(y_soft, axis=-1), depth=self._K, dtype=tf.float32)
+            return y_hard + tf.stop_gradient(y_soft - y_hard)
+
+        def deterministic() -> tf.Tensor:
+            return tf.one_hot(tf.argmax(logits, axis=-1), depth=self._K, dtype=tf.float32)
+
+        training_flag = tf.cast(training_flag, tf.bool)
+        return tf.cond(training_flag, sample, deterministic)
+
+    def call(self, observations, step_type=None, network_state=(), training: bool = False):
+        obs = tf.cast(observations, tf.float32)
+        latent, _, feature_maps = self.encoder(obs, training=training)
+        final_map = feature_maps[-1]
+
+        heatmap_logits = self.heatmap_head(final_map)
+        height = tf.shape(heatmap_logits)[1]
+        width = tf.shape(heatmap_logits)[2]
+
+        heatmaps = tf.transpose(heatmap_logits, [0, 3, 1, 2])
+        heatmaps = tf.reshape(heatmaps, [-1, height, width, 1])
+        coords = self.spatial_softmax(heatmaps)
+        xy_modes = tf.reshape(coords, [-1, self._K, 2])
+
+        gating_feat = self.gating_gap(final_map)
+        gating_hidden = self.gating_fc1(gating_feat)
+        gating_hidden = self.gating_fc2(gating_hidden)
+        gating_logits = self.gating_head(gating_hidden)
+
+        training_flag = tf.convert_to_tensor(training if training is not None else False, dtype=tf.bool)
+        tau = tf.cond(
+            training_flag,
+            lambda: tf.constant(0.7, dtype=tf.float32),
+            lambda: tf.constant(0.1, dtype=tf.float32),
+        )
+        mode_weights = self._gumbel_onehot(gating_logits, tau, training_flag)
+
+        probs = tf.nn.softmax(gating_logits, axis=-1)
+        entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-8), axis=-1)
+        entropy_loss = 0.001 * tf.reduce_mean(entropy)
+        self.add_loss(tf.cast(training_flag, tf.float32) * entropy_loss)
+
+        mode_weights_expanded = tf.expand_dims(mode_weights, axis=-1)
+        xy_selected = tf.reduce_sum(mode_weights_expanded * xy_modes, axis=1)
+        xy_clipped = tf.clip_by_value(xy_selected, 1e-3, 1.0 - 1e-3)
+        xy_pre = tf.clip_by_value(2.0 * xy_clipped - 1.0, -0.999, 0.999)
+        xy_base = tf.math.atanh(xy_pre)
+
+        xy_residual_input = tf.concat([latent, xy_selected], axis=-1)
+        xy_residual = self.xy_res_head(self.xy_res_fc2(self.xy_res_fc1(xy_residual_input)))
+        xy_mean = xy_base + xy_residual
+
+        diff_samples = []
+        grad_samples = []
+        lap_samples = []
+        for mode_idx in range(self._K):
+            coord = xy_modes[:, mode_idx, :]
+            diff_samples.append(bilinear_sample_nhwc(obs[..., 0:1], coord))
+            grad_samples.append(bilinear_sample_nhwc(obs[..., 3:4], coord))
+            lap_samples.append(bilinear_sample_nhwc(obs[..., 4:5], coord))
+        diff_stack = tf.stack(diff_samples, axis=1)
+        grad_stack = tf.stack(grad_samples, axis=1)
+        lap_stack = tf.stack(lap_samples, axis=1)
+        sampled_scalars = tf.concat([diff_stack, grad_stack, lap_stack], axis=-1)
+        sampled_flat = tf.reshape(sampled_scalars, [-1, self._K * 3])
+
+        dz_hidden = self.dz_hidden(sampled_flat)
+        dz_means = self.dz_mean_head(dz_hidden)
+        dz_logstd = self.dz_logstd_head(dz_hidden) + self._dz_logstd_bias
+
+        dz_mean_selected = tf.reduce_sum(dz_means * mode_weights, axis=-1, keepdims=True)
+        dz_logstd_selected = tf.reduce_sum(dz_logstd * mode_weights, axis=-1, keepdims=True)
+
+        xy_logstd = tf.clip_by_value(self._xy_logstd, -3.0, 1.0)
+        xy_scale_scalar = tf.nn.softplus(xy_logstd) + 1e-3
+        xy_scale = tf.ones_like(xy_mean) * xy_scale_scalar
+
+        dz_logstd_selected = tf.clip_by_value(dz_logstd_selected, -3.0, 1.0)
+        dz_scale = tf.nn.softplus(dz_logstd_selected) + 1e-3
+
+        mean = tf.concat([xy_mean, dz_mean_selected], axis=-1)
+        scale = tf.concat([xy_scale, dz_scale], axis=-1)
+
+        base_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=scale)
+        dist = tfp.distributions.TransformedDistribution(distribution=base_dist, bijector=self._bijector)
+        return dist, network_state
+
+
 __all__ = [
     'SpatialSoftmax',
     'SpatialSoftmaxEncoder',
     'SpatialSoftmaxActorNetwork',
+    'SpatialKActorNetwork',
     'SpatialSoftmaxCriticNetwork',
 ]

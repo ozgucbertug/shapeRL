@@ -57,7 +57,7 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=defaults.seed,
                         help="Random seed (omit to use library default stochastic behaviour)")
     parser.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
-                        choices=["cnn", "fpn", "spatial_softmax"],
+                        choices=["cnn", "spatial_softmax", "spatial_k"],
                         help="Backbone encoder architecture for actor/critic")
     parser.add_argument("--log_interval", type=int, default=defaults.log_interval,
                         help="Updates between throughput logs")

@@ -32,7 +32,11 @@ from shape_rl.policies import HeuristicPressPolicy
 from datetime import datetime
 
 # Import network architectures
-from shape_rl.networks import SpatialSoftmaxActorNetwork, SpatialSoftmaxCriticNetwork
+from shape_rl.networks import (
+    SpatialKActorNetwork,
+    SpatialSoftmaxActorNetwork,
+    SpatialSoftmaxCriticNetwork,
+)
 
 __all__ = ["train"]
 
@@ -131,8 +135,20 @@ def train(
 
     if encoder_type == 'spatial_softmax':
         actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
-        critic_net_1 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1')
-        critic_net_2 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2')
+        critic_net_1 = SpatialSoftmaxCriticNetwork(
+            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        )
+        critic_net_2 = SpatialSoftmaxCriticNetwork(
+            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        )
+    elif encoder_type == 'spatial_k':
+        actor_net = SpatialKActorNetwork(observation_spec, action_spec)
+        critic_net_1 = SpatialSoftmaxCriticNetwork(
+            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        )
+        critic_net_2 = SpatialSoftmaxCriticNetwork(
+            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        )
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
         actor_net = actor_distribution_network.ActorDistributionNetwork(
@@ -158,7 +174,7 @@ def train(
             name='critic_network_2'
         )
     else:
-        raise ValueError("encoder_type must be 'cnn' or 'spatial_softmax'.")
+        raise ValueError("encoder_type must be 'cnn', 'spatial_softmax', or 'spatial_k'.")
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
@@ -181,17 +197,16 @@ def train(
     tf_agent.initialize()
 
     def log_spatialsoftmax_temperature(step_val: int):
-        if encoder_type == 'spatial_softmax':
+        try:
+            temp_t = actor_net.current_temperature()
+        except AttributeError:
+            temp_t = None
+        if temp_t is not None:
             try:
-                temp_t = actor_net.current_temperature()
-            except AttributeError:
-                temp_t = None
-            if temp_t is not None:
-                try:
-                    temp_val = float(tf.reduce_mean(temp_t).numpy())
-                    tf.summary.scalar('model/spatialsoftmax_temperature', temp_val, step=step_val)
-                except Exception:
-                    pass
+                temp_val = float(tf.reduce_mean(temp_t).numpy())
+                tf.summary.scalar('model/spatialsoftmax_temperature', temp_val, step=step_val)
+            except Exception:
+                pass
 
     # ---- logging setup ----
     log_root = 'logs'
