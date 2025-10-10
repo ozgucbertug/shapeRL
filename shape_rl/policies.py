@@ -56,9 +56,7 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
         peak_pos = max(0.0, float(peak))
         # Map directly to normalized depth: depth_norm in [0,1]
         depth_norm = float(np.clip(self._depth_gain * peak_pos, 0.0, 1.0))
-        # Convert to absolute depth for clarity (not actually needed for the action)
-        depth = depth_norm * self._max_depth
-        dz_norm = depth_norm
+        dz_norm = depth_norm  # Absolute depth would be depth_norm * self._max_depth.
 
         return np.array([x_norm, y_norm, dz_norm], dtype=np.float32)
 
@@ -82,4 +80,3 @@ class HeuristicPressPolicy(py_policy.PyPolicy):
 
 
 __all__ = ["HeuristicPressPolicy"]
-

@@ -7,12 +7,10 @@ import numpy as np
 import tensorflow as tf
 from tqdm.auto import tqdm, trange
 
-# Additional keras imports for encoder architectures
-from tensorflow.keras import mixed_precision
 from tensorflow.keras.optimizers.legacy import Adam
 
 # ───── HIGH-PERF SWITCHES ─────────────────────────────────────────────────────
-# mixed_precision.set_global_policy('mixed_float16')        # FP16 everywhere that is safe
+# tf.keras.mixed_precision.set_global_policy('mixed_float16')        # FP16 everywhere that is safe
 # tf.config.optimizer.set_jit(True)            # XLA just-in-time compilation
 # -----------------------------------------------------------------------------
 
@@ -26,7 +24,6 @@ from tf_agents.policies import random_tf_policy
 from tf_agents.agents.sac import sac_agent
 from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
-import tensorflow_probability as tfp
 
 
 from shape_rl.envs import SandShapingEnv
@@ -219,7 +216,7 @@ def train(
         tf.summary.scalar('train/action_depth_mean',
                           tf.reduce_mean(actions[..., 2]), step=global_step)
 
-    def buffer_summary(trajectory):
+    def buffer_summary(_trajectory):
         # Log current size of the replay buffer
         tf.summary.scalar('replay_buffer/size',
                           replay_buffer.num_frames(), step=global_step)
