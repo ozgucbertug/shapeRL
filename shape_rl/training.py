@@ -324,23 +324,49 @@ def train(
     tqdm.write(f"[Warmup] Starting {'heuristic' if use_heuristic_warmup else 'random'} warm-up for {initial_collect_steps} transitions")
     warmup_start = time.perf_counter()
 
-    if use_heuristic_warmup:
-        observers = [replay_buffer.add_batch]
-        if warmup_rewards is not None:
-            observers.append(_warmup_observer)
-        heuristic_driver = PyDriver(
-            train_py_env,
-            heuristic_policy,
-            observers=observers,
-            max_steps=collect_steps_per_update * num_parallel_envs,
-        )
-        warmup_ts = train_py_env.reset()
-        while _num_frames() < initial_collect_steps:
-            warmup_ts, _ = heuristic_driver.run(warmup_ts)
-    else:
-        time_step = train_env.reset()
-        while _num_frames() < initial_collect_steps:
-            time_step, _ = random_driver.run(time_step)
+    warmup_bar = tqdm(
+        total=initial_collect_steps,
+        initial=min(_num_frames(), initial_collect_steps),
+        desc='Warmup',
+        dynamic_ncols=True,
+        leave=False,
+    )
+
+    def _warmup_update(prev_frames: int, new_frames: int):
+        capped_prev = min(prev_frames, initial_collect_steps)
+        capped_new = min(new_frames, initial_collect_steps)
+        delta = capped_new - capped_prev
+        if delta > 0:
+            warmup_bar.update(delta)
+
+    try:
+        if use_heuristic_warmup:
+            observers = [replay_buffer.add_batch]
+            if warmup_rewards is not None:
+                observers.append(_warmup_observer)
+            heuristic_driver = PyDriver(
+                train_py_env,
+                heuristic_policy,
+                observers=observers,
+                max_steps=collect_steps_per_update * num_parallel_envs,
+            )
+            warmup_ts = train_py_env.reset()
+            last_frames = _num_frames()
+            while _num_frames() < initial_collect_steps:
+                warmup_ts, _ = heuristic_driver.run(warmup_ts)
+                current_frames = _num_frames()
+                _warmup_update(last_frames, current_frames)
+                last_frames = current_frames
+        else:
+            time_step = train_env.reset()
+            last_frames = _num_frames()
+            while _num_frames() < initial_collect_steps:
+                time_step, _ = random_driver.run(time_step)
+                current_frames = _num_frames()
+                _warmup_update(last_frames, current_frames)
+                last_frames = current_frames
+    finally:
+        warmup_bar.close()
 
     warmup_elapsed = max(time.perf_counter() - warmup_start, 1e-6)
     collected = _num_frames()
