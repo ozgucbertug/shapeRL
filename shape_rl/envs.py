@@ -379,9 +379,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
                         err_g_before: float, err_g_after: float,
                         err_l_before: float, err_l_after: float,
                         removed: float) -> float:
-        # --- Relative improvements (scale-free) ---
-        rel_g = (err_g_before - err_g_after) / max(err_g_before, self._eps)
-        rel_l = (err_l_before - err_l_after) / max(err_l_before, self._eps)
+        # --- Relative improvements (normalized per-episode/scale-free) ---
+        denom = max(self._err0, self._eps)
+        rel_g = (err_g_before - err_g_after) / denom
+        rel_l = (err_l_before - err_l_after) / denom
         rel_g = float(np.clip(rel_g, -1.0, 1.0))
         rel_l = float(np.clip(rel_l, -1.0, 1.0))
         improve = self._global_weight * rel_g + self._local_weight * rel_l
