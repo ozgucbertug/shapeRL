@@ -508,34 +508,6 @@ def train(
                 for key, values in reward_terms.items():
                     tf.summary.scalar(f'train/reward_terms/{key}',
                                       float(np.mean(values)), step=update)
-            if eval_interval > 0 and update % eval_interval == 0:
-                # Detailed evaluation metrics
-                metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
-                rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
-                mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
-                w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-                
-                # Log evaluation scalars
-                tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=update)
-                tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=update)
-                tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=update)
-
-                tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=update)
-                tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=update)
-                tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=update)
-
-                tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=update)
-                tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=update)
-                tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=update)
-
-                # Log per-update eval curves as native TensorBoard scalars in a separate run dir
-                if log_eval_curves:
-                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:09d}")
-
-                print_eval_metrics(metrics, header="Eval", step=update)
             if log_interval > 0 and update % log_interval == 0:
                 now = time.perf_counter()
                 elapsed = max(now - last_log_time, 1e-6)
@@ -589,6 +561,34 @@ def train(
                     tqdm.write(f"[Checkpoint] Saved periodic checkpoint at step {step_to_save}")
                 except Exception as checkpoint_err:
                     tqdm.write(f"[Checkpoint] Failed to save periodic checkpoint: {checkpoint_err}")
+            if eval_interval > 0 and update % eval_interval == 0:
+                # Detailed evaluation metrics
+                metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
+                rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
+                mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
+                w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
+                
+                # Log evaluation scalars
+                tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=update)
+                tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=update)
+                tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=update)
+
+                tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=update)
+                tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=update)
+                tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=update)
+
+                tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=update)
+                tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=update)
+                tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=update)
+                tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=update)
+
+                # Log per-update eval curves as native TensorBoard scalars in a separate run dir
+                if log_eval_curves:
+                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:09d}")
+
+                print_eval_metrics(metrics, header="Eval", step=update)
     except KeyboardInterrupt:
         tqdm.write(f"[Train] Interrupted at update {current_update}")
     else:
