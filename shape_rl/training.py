@@ -35,12 +35,7 @@ from shape_rl.policies import HeuristicPressPolicy
 from datetime import datetime
 
 # Import network architectures
-from shape_rl.networks import (
-    FPNActorNetwork,
-    FPNCriticNetwork,
-    SpatialSoftmaxActorNetwork,
-    SpatialSoftmaxCriticNetwork,
-)
+from shape_rl.networks import SpatialSoftmaxActorNetwork, SpatialSoftmaxCriticNetwork
 
 __all__ = ["train"]
 
@@ -137,12 +132,7 @@ def train(
     observation_spec = train_env.observation_spec()
     action_spec = train_env.action_spec()
 
-    encoder_label = encoder_type
-    if encoder_type == 'fpn':
-        actor_net = FPNActorNetwork(observation_spec, action_spec)
-        critic_net_1 = FPNCriticNetwork(observation_spec, action_spec, name='FPNCriticNetwork_1')
-        critic_net_2 = FPNCriticNetwork(observation_spec, action_spec, name='FPNCriticNetwork_2')
-    elif encoder_type == 'spatial_softmax':
+    if encoder_type == 'spatial_softmax':
         actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
         critic_net_1 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1')
         critic_net_2 = SpatialSoftmaxCriticNetwork(observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2')
@@ -170,12 +160,11 @@ def train(
             joint_fc_layer_params=(256, 128),
             name='critic_network_2'
         )
-        encoder_label = "CNN"
     else:
-        raise ValueError(f"Unknown encoder_type '{encoder_type}'.")
+        raise ValueError("encoder_type must be 'cnn' or 'spatial_softmax'.")
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
-    tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_label}'")
+    tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
