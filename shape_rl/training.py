@@ -591,16 +591,16 @@ def train(
                 print_eval_metrics(metrics, header="Eval", step=update)
     except KeyboardInterrupt:
         tqdm.write(f"[Train] Interrupted at update {current_update}")
+        tqdm.write("[Checkpoint] Skipping final checkpoint save due to interruption")
     else:
         tqdm.write("[Train] Completed optimisation loop")
-    finally:
         # Determine which step to attach to terminal checkpoints.
         try:
             step_to_save = int(global_step.numpy())
         except Exception:
             step_to_save = current_update
 
-        # Optionally mirror the same state in the rolling lightweight checkpoints.
+        # Capture a lightweight checkpoint w/o the replay buffer.
         if checkpoint_interval > 0:
             try:
                 periodic_checkpointer.save(global_step=step_to_save)
@@ -608,7 +608,7 @@ def train(
             except Exception as checkpoint_err:
                 tqdm.write(f"[Checkpoint] Failed to save final periodic checkpoint: {checkpoint_err}")
 
-        # Capture a resumable checkpoint that includes the replay buffer.
+        # Capture a resumable checkpoint w/ replay buffer.
         try:
             os.makedirs(final_checkpoint_dir, exist_ok=True)
             final_checkpointer = common_utils.Checkpointer(
@@ -623,7 +623,7 @@ def train(
             tqdm.write(f"[Checkpoint] Saved final checkpoint with replay buffer to {final_checkpoint_dir}")
         except Exception as final_ckpt_err:
             tqdm.write(f"[Checkpoint] Failed to save final checkpoint with replay buffer: {final_ckpt_err}")
-
+    finally:
         tqdm.write("[Cleanup] Closing environments")
         with suppress(Exception):
             train_py_env.close()
