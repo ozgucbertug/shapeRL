@@ -24,6 +24,7 @@ from tf_agents.policies import random_tf_policy
 from tf_agents.agents.sac import sac_agent
 from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
+from tf_agents.utils import common as common_utils
 
 
 from shape_rl.envs import SandShapingEnv
@@ -64,6 +65,7 @@ def train(
     env_debug: bool = True,
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
+    checkpoint_interval: int | None = 50_000,
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:
@@ -216,6 +218,20 @@ def train(
     summary_writer.set_as_default()
     tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
 
+    if checkpoint_interval is None:
+        checkpoint_interval = 0
+    else:
+        try:
+            checkpoint_interval = int(checkpoint_interval)
+        except (TypeError, ValueError):
+            checkpoint_interval = 0
+        if checkpoint_interval < 0:
+            checkpoint_interval = 0
+
+    # Prepare output locations for periodic and final checkpoints.
+    final_checkpoint_dir = os.path.join(logdir, "final_checkpoint")
+    periodic_checkpoint_dir = os.path.join(logdir, "checkpoints")
+
 
     def collect_summary(trajectory):
         # Log the mean reward of the collected trajectories
@@ -241,6 +257,15 @@ def train(
         batch_size=num_parallel_envs,
         max_length=replay_buffer_capacity
     )
+    # Lightweight checkpointer keeps only the agent state (no replay buffer) for fast periodic saves.
+    os.makedirs(periodic_checkpoint_dir, exist_ok=True)
+    periodic_checkpointer = common_utils.Checkpointer(
+        ckpt_dir=periodic_checkpoint_dir,
+        max_to_keep=5,
+        agent=tf_agent,
+        global_step=global_step,
+    )
+    periodic_checkpointer.initialize_or_restore()
     dataset = replay_buffer.as_dataset(
         sample_batch_size=batch_size,
         num_steps=2,
@@ -553,11 +578,52 @@ def train(
 
                 last_log_time = now
                 last_log_update = update
+            if checkpoint_interval > 0 and update % checkpoint_interval == 0:
+                try:
+                    step_to_save = int(global_step.numpy())
+                except Exception:
+                    step_to_save = update
+                try:
+                    # Periodically snapshot the lightweight checkpoint during training.
+                    periodic_checkpointer.save(global_step=step_to_save)
+                    tqdm.write(f"[Checkpoint] Saved periodic checkpoint at step {step_to_save}")
+                except Exception as checkpoint_err:
+                    tqdm.write(f"[Checkpoint] Failed to save periodic checkpoint: {checkpoint_err}")
     except KeyboardInterrupt:
         tqdm.write(f"[Train] Interrupted at update {current_update}")
     else:
         tqdm.write("[Train] Completed optimisation loop")
     finally:
+        # Determine which step to attach to terminal checkpoints.
+        try:
+            step_to_save = int(global_step.numpy())
+        except Exception:
+            step_to_save = current_update
+
+        # Optionally mirror the same state in the rolling lightweight checkpoints.
+        if checkpoint_interval > 0:
+            try:
+                periodic_checkpointer.save(global_step=step_to_save)
+                tqdm.write(f"[Checkpoint] Saved final periodic checkpoint at step {step_to_save}")
+            except Exception as checkpoint_err:
+                tqdm.write(f"[Checkpoint] Failed to save final periodic checkpoint: {checkpoint_err}")
+
+        # Capture a resumable checkpoint that includes the replay buffer.
+        try:
+            os.makedirs(final_checkpoint_dir, exist_ok=True)
+            final_checkpointer = common_utils.Checkpointer(
+                ckpt_dir=final_checkpoint_dir,
+                max_to_keep=1,
+                agent=tf_agent,
+                policy=tf_agent.policy,
+                replay_buffer=replay_buffer,
+                global_step=global_step,
+            )
+            final_checkpointer.save(global_step=step_to_save)
+            tqdm.write(f"[Checkpoint] Saved final checkpoint with replay buffer to {final_checkpoint_dir}")
+        except Exception as final_ckpt_err:
+            tqdm.write(f"[Checkpoint] Failed to save final checkpoint with replay buffer: {final_ckpt_err}")
+
         tqdm.write("[Cleanup] Closing environments")
         with suppress(Exception):
             train_py_env.close()

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 @dataclass
 class TrainingConfig:
     seed: int | None = None
-    encoder_type: str = 'spatial_softmax'
+    encoder_type: str = 'spatial_k'
     num_updates: int = 250_000
     num_parallel_envs: int = 64
     collect_steps_per_update: int = 4
@@ -30,6 +30,7 @@ class TrainingConfig:
     num_eval_episodes: int = 1
     eval_interval: int = 5_000
     log_eval_curves: bool = True
+    checkpoint_interval: int | None = 50_000
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -65,7 +66,8 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
                         help="Warm-up transitions to gather before training (default auto-computed)")
     parser.add_argument("--replay_capacity_total", type=int, default=defaults.replay_capacity_total,
                         help="Total replay capacity (overrides default sizing computed from batch/parallel envs)")
-
+    parser.add_argument("--checkpoint_interval", type=int, default=defaults.checkpoint_interval,
+                        help="Updates between lightweight checkpoints (set to 0 to disable)")
     parser.add_argument("--heuristic_warmup", dest="use_heuristic_warmup", action="store_true",
                         help="Use heuristic policy to warm up the replay buffer")
     parser.add_argument("--no_heuristic_warmup", dest="use_heuristic_warmup", action="store_false",
@@ -119,6 +121,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         env_debug=cfg.env_debug,
         replay_capacity_total=cfg.replay_capacity_total,
         log_eval_curves=cfg.log_eval_curves,
+        checkpoint_interval=cfg.checkpoint_interval,
     )
 
 
