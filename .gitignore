@@ -168,3 +168,4 @@ cython_debug/
 /ckpts
 /policies
 /.vscode
+/log_archive
