@@ -387,6 +387,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         rel_g = float(np.clip(rel_g, -1.0, 1.0))
         rel_l = float(np.clip(rel_l, -1.0, 1.0))
         improve = self._global_weight * rel_g + self._local_weight * rel_l
+        # Scale overall reward to a healthier magnitude for learning
+        reward_scale = 10.0
 
         # --- Gentle, sign-aware volume shaping (normalized) ---
         removed_norm = removed / (self._max_press_volume + self._eps)
@@ -397,7 +399,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         pos_bonus = self._volume_penalty_coeff * removed_norm * gain
         neg_pen   = 2.0 * self._volume_penalty_coeff * removed_norm * loss  # asymmetric, stronger when harming
 
-        reward = improve + pos_bonus - neg_pen
+        reward = reward_scale * improve + pos_bonus - neg_pen
 
         if self.debug:
             self._last_reward_terms = {
