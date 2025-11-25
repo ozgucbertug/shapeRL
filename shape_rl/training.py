@@ -66,6 +66,7 @@ def train(
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
     checkpoint_interval: int | None = 50_000,
+    learning_rate: float = 3e-4
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:
@@ -84,7 +85,6 @@ def train(
         target_total_replay = max(4096 * 4, batch_size * 64)
     replay_buffer_capacity = max(1, math.ceil(target_total_replay / env_divisor))
     total_replay_capacity = replay_buffer_capacity * env_divisor
-    learning_rate = 1e-4
     gamma = 0.99
     tqdm.write(
         "[Init] Derived hyperparameters — "

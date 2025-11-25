@@ -17,12 +17,12 @@ from dataclasses import dataclass
 class TrainingConfig:
     seed: int | None = None
     encoder_type: str = 'spatial_k'
-    num_updates: int = 300_000
-    num_parallel_envs: int = 64
-    collect_steps_per_update: int = 4
-    batch_size: int = 256
+    num_updates: int = 200_000
+    num_parallel_envs: int = 128
+    collect_steps_per_update: int = 16
+    batch_size: int = 512
     use_heuristic_warmup: bool = True
-    initial_collect_steps: int | None = 2**18
+    initial_collect_steps: int | None = 2**17
     replay_capacity_total: int | None = 2**19
     debug: bool = False
     env_debug: bool = True
@@ -122,6 +122,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         replay_capacity_total=cfg.replay_capacity_total,
         log_eval_curves=cfg.log_eval_curves,
         checkpoint_interval=cfg.checkpoint_interval,
+        learning_rate = 1e-4
     )
 
 
