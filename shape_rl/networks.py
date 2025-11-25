@@ -272,10 +272,9 @@ class SpatialSoftmaxActorNetwork(network.Network):
         diff_xy = bilinear_sample_nhwc(obs[..., 0:1], xy)
         grad_xy = bilinear_sample_nhwc(obs[..., 3:4], xy)
         lap_xy = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        # scale_ratio is constant per episode; use a batch-constant token rather than bilinear sampling
-        scale_token = tf.reduce_mean(obs[..., 5:6], axis=[1, 2])  # [B,1]
+        # Global scale token is constant per episode; reduce over spatial dims.
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
         local_feat = tf.concat([local_feat, diff_xy, grad_xy, lap_xy, scale_token], axis=-1)
-        local_feat = tf.stop_gradient(local_feat)
         fused_in = tf.concat([latent, xy, scale_token], axis=-1)
         fused = self.fc1(fused_in)
         fused = self.fc2(fused)
@@ -328,8 +327,8 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         diff = bilinear_sample_nhwc(obs[..., 0:1], xy)
         grad = bilinear_sample_nhwc(obs[..., 3:4], xy)
         lap  = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        # scale_ratio is constant per episode; use a batch-constant token rather than bilinear sampling
-        scale_token = tf.reduce_mean(obs[..., 5:6], axis=[1, 2])  # [B,1]
+        # Global scale token is constant per episode; reduce over spatial dims.
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
         sampled_scalars = tf.concat([diff, grad, lap, scale_token], axis=-1)
 
         fused = tf.concat([latent, action_latent, local_feat, sampled_scalars], axis=-1)
@@ -452,8 +451,8 @@ class SpatialKActorNetwork(network.Network):
         diff_stack = tf.stack(diff_samples, axis=1)
         grad_stack = tf.stack(grad_samples, axis=1)
         lap_stack = tf.stack(lap_samples, axis=1)
-        # scale_ratio is constant per episode; tile across modes
-        scale_token = tf.reduce_mean(obs[..., 5:6], axis=[1, 2])           # [B,1]
+        # scale token is constant per episode; tile across modes
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])           # [B,1]
         tok_scale_stack = tf.tile(scale_token[:, None, :], [1, self._K, 1])
         sampled_scalars = tf.concat([diff_stack, grad_stack, lap_stack, tok_scale_stack], axis=-1)
         sampled_flat = tf.reshape(sampled_scalars, [-1, self._K * (3 + 1)])

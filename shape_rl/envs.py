@@ -73,6 +73,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         self._local_radius = 3 * self._tool_radius
         self._max_press_volume = self._compute_max_press_volume()
+        self._depth_unit = max(self.max_push_mult * self._tool_radius, self._eps)
         self._last_reward_terms: dict[str, float] = {}
 
         # ── INTERNAL WORK BUFFERS ─────────────────────────────────
@@ -82,7 +83,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._tgt_norm_buf = np.empty((H, W), dtype=np.float32)
         self._grad_buf     = np.empty((H, W), dtype=np.float32)  # |∇diff|
         self._lap_buf      = np.empty((H, W), dtype=np.float32)  # Δ diff
-        # [diff, env, tgt, grad, lap, scale_ratio]
+        # [diff, env, tgt, grad, lap, scale_token]
         self._obs_buf      = np.empty((H, W, 6), dtype=np.float32)
 
         # ── SPECS ────────────────────────────────────────────────
@@ -96,8 +97,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._observation_spec = array_spec.BoundedArraySpec(
             shape=(H, W, 6),
             dtype=np.float32,
-            minimum=-1.0,
-            maximum=1.0,
+            minimum=-5.0,
+            maximum=5.0,
             name='observation'
         )
 
@@ -163,21 +164,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         lap += padded[1:-1, :-2] - center                # + (W - C)
         return lap
 
-    def _update_grad_lap(self, diff: np.ndarray):
-        """Update gradient magnitude and Laplacian buffers with per-episode robust scaling."""
-        # Gradient magnitude (non-negative)
-        gy, gx = np.gradient(diff)
-        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff|
-        scale_grad = self._s_grad if self._s_grad > self._eps else 1.0
-        np.divide(self._grad_buf, scale_grad, out=self._grad_buf)
-        # Clip to [0, 1] since this is a magnitude
-        np.clip(self._grad_buf, 0.0, 1.0, out=self._grad_buf)
+    def _update_grad_lap(self, diff_canon: np.ndarray):
+        """Update gradient magnitude and Laplacian buffers in canonical units."""
+        gy, gx = np.gradient(diff_canon)
+        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff| in canonical units per pixel
+        np.clip(self._grad_buf, 0.0, 5.0, out=self._grad_buf)
 
-        # Signed Laplacian
-        lap = self._laplacian(diff)  # writes into self._lap_buf
-        scale_lap = self._s_lap if self._s_lap > self._eps else 1.0
-        np.divide(lap, scale_lap, out=self._lap_buf)
-        np.clip(self._lap_buf, -1.0, 1.0, out=self._lap_buf)
+        lap = self._laplacian(diff_canon)  # writes into self._lap_buf
+        np.clip(self._lap_buf, -5.0, 5.0, out=self._lap_buf)
 
     # ------------------------------------------------------------------ #
     # Utility: build observation tensor                                  #
@@ -186,25 +180,24 @@ class SandShapingEnv(py_environment.PyEnvironment):
         """Return the observation tensor using pre-allocated buffers."""
         assert self._env_map is not None
 
-        # 0: signed diff (per-episode robust scaled)
-        scale_diff = self._s_diff if self._s_diff > self._eps else 1.0
-        np.divide(diff, scale_diff, out=self._work_diff)
-        np.clip(self._work_diff, -1.0, 1.0, out=self._work_diff)
+        depth_unit = self._depth_unit
 
-        # 1: env height normalized by running mean
+        # 0: signed diff in canonical depth units
+        np.divide(diff, depth_unit, out=self._work_diff)
+        np.clip(self._work_diff, -5.0, 5.0, out=self._work_diff)
+
+        # 1: env height normalized by running mean, canonical units
         np.subtract(h, self._env_map._mean, out=self._env_norm_buf)
-        scale_env = self._s_env_h if self._s_env_h > self._eps else 1.0
-        np.divide(self._env_norm_buf, scale_env, out=self._env_norm_buf)
-        np.clip(self._env_norm_buf, -1.0, 1.0, out=self._env_norm_buf)
+        np.divide(self._env_norm_buf, depth_unit, out=self._env_norm_buf)
+        np.clip(self._env_norm_buf, -5.0, 5.0, out=self._env_norm_buf)
 
-        # 2: target height normalized by per-episode mean
+        # 2: target height normalized by per-episode mean, canonical units
         np.subtract(t, self._tgt_mean, out=self._tgt_norm_buf)
-        scale_tgt = self._s_tgt_h if self._s_tgt_h > self._eps else 1.0
-        np.divide(self._tgt_norm_buf, scale_tgt, out=self._tgt_norm_buf)
-        np.clip(self._tgt_norm_buf, -1.0, 1.0, out=self._tgt_norm_buf)
+        np.divide(self._tgt_norm_buf, depth_unit, out=self._tgt_norm_buf)
+        np.clip(self._tgt_norm_buf, -5.0, 5.0, out=self._tgt_norm_buf)
 
-        # 3–4: gradient magnitude & Laplacian of raw diff
-        self._update_grad_lap(diff)
+        # 3–4: gradient magnitude & Laplacian of canonical diff
+        self._update_grad_lap(self._work_diff)
 
         # Assemble
         self._obs_buf[..., 0] = self._work_diff
@@ -213,11 +206,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._obs_buf[..., 3] = self._grad_buf
         self._obs_buf[..., 4] = self._lap_buf
 
-        # --- Single scale token (constant plane per episode) ---
-        # scale_ratio encodes how large the episode's typical diff is relative to a single-press depth.
-        dz_cap = float(self.max_push_mult * self._tool_radius)
-        scale_ratio = float(np.clip(self._s_diff / (dz_cap + self._eps), 0.0, 1.0))
-        self._obs_buf[..., 5] = scale_ratio
+        # --- Single global scale token (constant plane per episode) ---
+        # log-scaled typical diff relative to one max press depth.
+        token_scale = float(np.log1p(max(self._s_diff, self._err0) / (depth_unit + self._eps)))
+        token_scale = float(np.clip(token_scale, -5.0, 5.0))
+        self._obs_buf[..., 5] = token_scale
 
         return self._obs_buf
 
