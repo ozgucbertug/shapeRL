@@ -8,8 +8,6 @@ from typing import Callable, Dict, Any, Sequence
 from contextlib import suppress
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 from tf_agents.environments import tf_py_environment
 from tf_agents.policies import py_policy as _py_policy
@@ -19,7 +17,6 @@ from tqdm.auto import tqdm
 from shape_rl.terrain import HeightMap
 
 
-EMD_MAX_POINTS = 512
 WASSERSTEIN_MAX_POINTS = 1024
 
 
@@ -148,46 +145,6 @@ def wasserstein_distance_2d(env_or_map: HeightMap | np.ndarray,
         xb, b = xb[idx], b[idx]
 
     return _sinkhorn_wasserstein(a, b, xa, xb, reg=reg)
-
-
-def heightmap_pointcloud(heightmap: HeightMap) -> np.ndarray:
-    surface = np.array(heightmap.map, dtype=np.float32, copy=False)
-    h, w = surface.shape
-    centered = surface - float(surface.mean())
-    yy, xx = np.indices((h, w), dtype=np.float32)
-    if h > 1:
-        yy /= float(h - 1)
-    if w > 1:
-        xx /= float(w - 1)
-    cloud = np.stack((xx, yy, centered), axis=-1)
-    return cloud.reshape(-1, 3)
-
-
-def chamfer_distance(pc_a: np.ndarray, pc_b: np.ndarray) -> float:
-    if pc_a.size == 0 or pc_b.size == 0:
-        return float('nan')
-    tree_a = cKDTree(pc_a)
-    tree_b = cKDTree(pc_b)
-    dist_ab, _ = tree_a.query(pc_b, k=1)
-    dist_ba, _ = tree_b.query(pc_a, k=1)
-    return float(0.5 * (np.mean(dist_ab ** 2) + np.mean(dist_ba ** 2)))
-
-
-def earth_movers_distance(pc_a: np.ndarray, pc_b: np.ndarray, max_points: int = EMD_MAX_POINTS) -> float:
-    if pc_a.size == 0 or pc_b.size == 0:
-        return float('nan')
-    n_a = pc_a.shape[0]
-    n_b = pc_b.shape[0]
-    m = min(n_a, n_b, max_points)
-    if m < 1:
-        return float('nan')
-    idx_a = np.linspace(0, n_a - 1, num=m, dtype=int)
-    idx_b = np.linspace(0, n_b - 1, num=m, dtype=int)
-    sample_a = pc_a[idx_a]
-    sample_b = pc_b[idx_b]
-    cost = cdist(sample_a, sample_b, metric='euclidean')
-    row_ind, col_ind = linear_sum_assignment(cost)
-    return float(cost[row_ind, col_ind].mean())
 
 
 def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes: int = 10,
@@ -396,13 +353,9 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
 
 __all__ = [
     'compute_eval',
-    'heightmap_pointcloud',
     'normalized_auc',
     'wasserstein_distance_2d',
-    'EMD_MAX_POINTS',
     'WASSERSTEIN_MAX_POINTS',
-    'chamfer_distance',
-    'earth_movers_distance',
     'log_eval_metric_curves',
     'print_eval_metrics',
     'summarize_metric_series',

@@ -221,45 +221,5 @@ class HeightMap:
     def playable_view(self):
         return self.map
 
-    def smooth_patch(self, x: float, y: float, strength: float) -> float:
-        if strength <= 1e-3:
-            return 0.0
-        strength = float(np.clip(strength, 0.0, 1.0))
-        x += self.pad
-        y += self.pad
-        r = self.tool_radius
-        cy = int(np.clip(round(y), r, self.height - r - 1))
-        cx = int(np.clip(round(x), r, self.width - r - 1))
-        patch = self._full_map[cy - r:cy + r + 1, cx - r:cx + r + 1]
-        mask = self._press_mask
-        masked_values = patch[mask]
-        mean_val = float(np.mean(masked_values))
-        blended = masked_values * (1.0 - strength) + mean_val * strength
-        patch[mask] = np.maximum(blended, self.bedrock)
-        self._update_stats()
-        return float(np.sum(masked_values - patch[mask]))
-
-    def clone(self):
-        clone = HeightMap.__new__(HeightMap)
-        clone.playable_width = self.playable_width
-        clone.playable_height = self.playable_height
-        clone.pad = self.pad
-        clone.width = self.width
-        clone.height = self.height
-        clone.tool_radius = self.tool_radius
-        clone._press_mask = self._press_mask
-        clone._press_dist2 = self._press_dist2
-        clone._press_offset = self._press_offset
-        clone._full_map = self._full_map.copy()
-        clone._size = self._size
-        clone._diff_buf = np.empty_like(self._diff_buf)
-        clone._sum = self._sum
-        clone._mean = self._mean
-        clone.scale = self.scale
-        clone.amplitude = self.amplitude
-        clone.bedrock_offset = self.bedrock_offset
-        clone.bedrock = self.bedrock
-        return clone
-
 
 __all__ = ["HeightMap", "generate_perlin_noise_2d"]
