@@ -17,7 +17,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         target_scale_range=(2, 4),
         amplitude_range=(10.0, 40.0),
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
-        tool_radius: int = 9,
+        tool_radius: int = 5,
         max_steps: int = 200,
         max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
@@ -71,7 +71,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._global_weight        = 0.7
         self._local_weight         = 0.3
 
-        self._local_radius = 3 * self._tool_radius
+        self._local_radius = 1 * self._tool_radius
         self._max_press_volume = self._compute_max_press_volume()
         self._depth_unit = max(self.max_push_mult * self._tool_radius, self._eps)
         self._last_reward_terms: dict[str, float] = {}
