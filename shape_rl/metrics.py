@@ -341,12 +341,18 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
     rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
     mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
     w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-    steps_mean = metrics.get('steps_mean', -1.0)
+    steps_mean_val = metrics.get('steps_mean')
+    if steps_mean_val is None:
+        steps = metrics.get('steps_per_episode') or []
+        if steps:
+            steps_mean_val = float(np.mean(np.asarray(steps, dtype=np.float64)))
+    else:
+        steps_mean_val = float(steps_mean_val)
 
     tqdm.write(sep)
     tqdm.write(head)
-    if steps_mean >= 0:
-        tqdm.write(f"Steps avg: {steps_mean:.1f}")
+    if steps_mean_val is not None:
+        tqdm.write(f"Steps mean: {steps_mean_val:.1f}")
     tqdm.write(
         f"MAE  Δ={mae_summary['delta']:.4f} %={mae_summary['relative_improvement']:.2%} "
         f"(init {mae_summary['initial']:.4f} → final {mae_summary['final']:.4f})"

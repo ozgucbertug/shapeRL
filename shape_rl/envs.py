@@ -25,7 +25,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         relative_success_frac: float = 0.05,
         plateau_min_steps: int = 32,
         plateau_patience: int = 8,
-        plateau_improve_tol: float = 0.005,
+        plateau_improve_tol: float = 0.001,
         success_bonus: float = 1.0,
         fail_penalty: float = -1.0,
         terminate_on_success: bool = True,
