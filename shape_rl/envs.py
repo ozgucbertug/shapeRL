@@ -18,10 +18,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         amplitude_range=(10.0, 40.0),
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         tool_radius: int = 5,
-        max_steps: int = 200,
+        max_steps: int = 1024,
         max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         error_threshold: float = 0.05,
+        relative_success_frac: float = 0.05,
+        plateau_min_steps: int = 32,
+        plateau_patience: int = 8,
+        plateau_improve_tol: float = 0.005,
         success_bonus: float = 1.0,
         fail_penalty: float = -1.0,
         terminate_on_success: bool = True,
@@ -43,8 +47,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._target_scale_range = target_scale_range
         self._amplitude_range = amplitude_range
         self._amp_max = self._amplitude_range[1]
-        # scaling for obs
-        self._inv_scale_d = 2.0 / self._amp_max   # diff/grad/lap
 
         # Per-episode robust scales for diff/grad/lap
         self._s_diff = 1.0
@@ -64,6 +66,10 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._fail_penalty         = fail_penalty
         self._terminate_on_success = terminate_on_success
         self._fail_on_breach       = fail_on_breach
+        self._relative_success_frac = relative_success_frac
+        self._plateau_min_steps     = plateau_min_steps
+        self._plateau_patience      = plateau_patience
+        self._plateau_improve_tol   = plateau_improve_tol
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
         self._volume_penalty_coeff = 3e-4
@@ -75,6 +81,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._max_press_volume = self._compute_max_press_volume()
         self._depth_unit = max(self.max_push_mult * self._tool_radius, self._eps)
         self._last_reward_terms: dict[str, float] = {}
+        self._success_threshold = self._error_threshold
+        self._plateau_tol = 0.0
 
         # ── INTERNAL WORK BUFFERS ─────────────────────────────────
         H, W = self._patch_height, self._patch_width
@@ -271,6 +279,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Initial global error
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
         self._current_err_global = self._err0
+        self._best_err = self._err0
+        self._plateau_counter = 0
+        self._success_threshold = max(self._error_threshold,
+                                      self._relative_success_frac * self._err0)
+        self._plateau_tol = self._plateau_improve_tol * self._err0
 
         # Build first observation using the new per-episode scales
         obs = self._build_observation(diff, h, t)
@@ -282,6 +295,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ------------------------------------------------------------------ #
     # One environment step                                               #
     # ------------------------------------------------------------------ #
+    def _observe(self, diff):
+        h = self._env_map.map
+        t = self._target_map.map
+        return self._build_observation(diff, h, t)
+
+    def _terminate_episode(self, diff_after, err_g_after, reward):
+        self._episode_ended = True
+        self._current_err_global = err_g_after
+        obs = self._observe(diff_after)
+        return ts.termination(obs, reward)
+
     def _step(self, action: np.ndarray):
         if self._episode_ended:
             return self._reset()
@@ -314,7 +338,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
 
         # Apply press and measure removed volume
-        removed, touched = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
+        removed, _ = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
 
         # Global & local RMSE after the press
         diff_after, err_g_after = self._diff_and_rmse()
@@ -325,38 +349,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             removed
         )
 
-        # ----- early-termination checks -----
-        if self._terminate_on_success and err_g_after <= self._error_threshold:
-            self._episode_ended = True
-            reward += self._success_bonus
-            h = self._env_map.map; t = self._target_map.map
-            self._current_err_global = err_g_after
-            obs = self._build_observation(diff_after, h, t)
-            if self.debug:
-                self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
-                self._last_lap  = float(np.sqrt(np.mean(self._lap_buf**2)))
-            return ts.termination(obs, reward)
-
-        # Use explicit bedrock from HeightMap for breach check
-        bedrock = getattr(self._env_map, "bedrock", 0.0)
-        if self._fail_on_breach and np.any(self._env_map.map < bedrock - 1e-9):
-            self._episode_ended = True
-            reward += self._fail_penalty
-            h = self._env_map.map; t = self._target_map.map
-            self._current_err_global = err_g_after
-            obs = self._build_observation(diff_after, h, t)
-            if self.debug:
-                self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
-                self._last_lap  = float(np.sqrt(np.mean(self._lap_buf**2)))
-            return ts.termination(obs, reward)
-
-        self._step_count += 1
-
-        h = self._env_map.map; t = self._target_map.map
-        self._current_err_global = err_g_after
-        obs = self._build_observation(diff_after, h, t)
-
-        # Debug scalars used by training.py if present
+        # Debug scalars (log once so both transition/termination paths share)
         if self.debug:
             self._last_removed_norm = removed / (self._max_press_volume + self._eps)
             self._last_removed = removed
@@ -366,6 +359,35 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._last_err_local = err_l_after
             self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
             self._last_lap  = float(np.sqrt(np.mean(self._lap_buf**2)))
+
+        # Count this step before applying patience logic
+        self._step_count += 1
+
+        # Update best-so-far error and plateau counter
+        if (self._best_err - err_g_after) > self._plateau_tol:
+            self._best_err = err_g_after
+            self._plateau_counter = 0
+        elif self._step_count >= self._plateau_min_steps:
+            self._plateau_counter += 1
+
+        # ----- early-termination checks -----
+        if self._terminate_on_success and err_g_after <= self._success_threshold:
+            reward += self._success_bonus
+            return self._terminate_episode(diff_after, err_g_after, reward)
+
+        # Use explicit bedrock from HeightMap for breach check
+        bedrock = getattr(self._env_map, "bedrock", 0.0)
+        if self._fail_on_breach and np.any(self._env_map.map < bedrock - 1e-9):
+            reward += self._fail_penalty
+            return self._terminate_episode(diff_after, err_g_after, reward)
+
+        # Plateau early-stop: no meaningful improvement for a patience window
+        if (self._step_count >= self._plateau_min_steps and
+                self._plateau_counter >= self._plateau_patience):
+            return self._terminate_episode(diff_after, err_g_after, reward)
+
+        self._current_err_global = err_g_after
+        obs = self._observe(diff_after)
 
         if self._step_count >= self._max_steps:
             self._episode_ended = True

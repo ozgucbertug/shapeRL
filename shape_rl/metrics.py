@@ -155,6 +155,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
     rmse_series_list: list[list[float]] = []
     mae_series_list: list[list[float]] = []
     w2_series_list: list[list[float]] = []
+    steps_list: list[int] = []
 
     for ep in range(num_episodes):
         env = env_factory(ep if base_seed is None else base_seed + ep)
@@ -169,13 +170,15 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
             diff0 = env._env_map.difference(env._target_map)
             rmse0 = float(np.sqrt(np.mean(diff0 ** 2)))
             mae0 = float(np.mean(np.abs(diff0)))
-            w20 = wasserstein_distance_2d(env._env_map, env._target_map,
+            w20 = wasserstein_distance_2d(diff0,
+                                          target_map=None,
                                           stride=w2_stride, reg=w2_reg,
                                           max_points=w2_max_points)
 
             rmse_series = [rmse0]
             mae_series = [mae0]
             w2_series = [w20]
+            steps = 0
 
             while not time_step.is_last():
                 action_step = policy.action(time_step)
@@ -185,12 +188,19 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                 else:
                     time_step = tf_env.step(action)
 
+                steps += 1
                 diff = env._env_map.difference(env._target_map)
                 rmse_series.append(float(np.sqrt(np.mean(diff ** 2))))
                 mae_series.append(float(np.mean(np.abs(diff))))
-                w2_series.append(wasserstein_distance_2d(env._env_map, env._target_map,
-                                                         stride=w2_stride, reg=w2_reg,
-                                                         max_points=w2_max_points))
+                w2_series.append(
+                    wasserstein_distance_2d(
+                        diff,
+                        target_map=None,
+                        stride=w2_stride,
+                        reg=w2_reg,
+                        max_points=w2_max_points,
+                    )
+                )
         finally:
             with suppress(Exception):
                 (tf_env.close() if tf_env is not None else None)
@@ -200,6 +210,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         rmse_series_list.append(rmse_series)
         mae_series_list.append(mae_series)
         w2_series_list.append(w2_series)
+        steps_list.append(int(steps))
 
     def _stack_pad_nan(series_list):
         if not series_list:
@@ -218,11 +229,14 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
     rmse_mean = np.nanmean(rmse_arr, axis=0).tolist() if rmse_arr is not None else []
     mae_mean = np.nanmean(mae_arr, axis=0).tolist() if mae_arr is not None else []
     w2_mean = np.nanmean(w2_arr, axis=0).tolist() if w2_arr is not None else []
+    steps_mean = float(np.mean(steps_list)) if steps_list else -1.0
 
     return {
         'rmse_series_mean': rmse_mean,
         'mae_series_mean': mae_mean,
         'w2_series_mean': w2_mean,
+        'steps_per_episode': steps_list,
+        'steps_mean': steps_mean,
     }
 
 
@@ -327,9 +341,12 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
     rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
     mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
     w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
+    steps_mean = metrics.get('steps_mean', -1.0)
 
     tqdm.write(sep)
     tqdm.write(head)
+    if steps_mean >= 0:
+        tqdm.write(f"Steps avg: {steps_mean:.1f}")
     tqdm.write(
         f"MAE  Δ={mae_summary['delta']:.4f} %={mae_summary['relative_improvement']:.2%} "
         f"(init {mae_summary['initial']:.4f} → final {mae_summary['final']:.4f})"

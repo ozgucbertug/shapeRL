@@ -210,6 +210,31 @@ def train(
             except Exception:
                 pass
 
+    def log_eval_summaries(metrics: dict, step_val: int):
+        rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
+        mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
+        w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
+        steps_mean = metrics.get('steps_mean', -1.0)
+
+        tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=step_val)
+
+        tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=step_val)
+
+        tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=step_val)
+        if steps_mean >= 0:
+            tf.summary.scalar('eval/steps_mean', steps_mean, step=step_val)
+
+        return rmse_summary, mae_summary, w2_summary
+
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
@@ -564,25 +589,7 @@ def train(
             if eval_interval > 0 and update % eval_interval == 0:
                 # Detailed evaluation metrics
                 metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
-                rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
-                mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
-                w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-                
-                # Log evaluation scalars
-                tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=update)
-                tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=update)
-                tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=update)
-
-                tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=update)
-                tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=update)
-                tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=update)
-
-                tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=update)
-                tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=update)
-                tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=update)
-                tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=update)
+                rmse_summary, mae_summary, w2_summary = log_eval_summaries(metrics, update)
 
                 # Log per-update eval curves as native TensorBoard scalars in a separate run dir
                 if log_eval_curves:
