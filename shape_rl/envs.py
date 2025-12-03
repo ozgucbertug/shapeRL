@@ -23,8 +23,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         error_threshold: float = 0.05,
         relative_success_frac: float = 0.05,
-        plateau_min_steps: int = 32,
-        plateau_patience: int = 8,
+        plateau_min_steps: int = 64,
+        plateau_patience: int = 16,
         plateau_improve_tol: float = 0.001,
         success_bonus: float = 1.0,
         fail_penalty: float = -1.0,

@@ -215,11 +215,7 @@ def train(
         mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
         w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
         steps_mean = metrics.get('steps_mean')
-        if steps_mean is None:
-            steps = metrics.get('steps_per_episode') or []
-            if steps:
-                steps_mean = float(np.mean(np.asarray(steps, dtype=np.float64)))
-        else:
+        if steps_mean is not None:
             steps_mean = float(steps_mean)
 
         tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=step_val)
