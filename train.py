@@ -10,27 +10,36 @@ from tf_agents.system import system_multiprocessing as tf_mp
 
 from shape_rl.training import train as _train
 
-
-from dataclasses import dataclass
-
 @dataclass
 class TrainingConfig:
+    # Environment
     seed: int | None = None
-    encoder_type: str = 'spatial_k'
-    num_updates: int = 200_000
     num_parallel_envs: int = 128
-    collect_steps_per_update: int = 16
+    env_debug: bool = True
+
+    # Model
+    encoder_type: str = 'spatial_softmax'
+
+    # Training loop
+    num_updates: int = 200_000
     batch_size: int = 512
-    use_heuristic_warmup: bool = True
+    collect_steps_per_update: int = 8
+    learning_rate: float = 1e-4
+
+    # Warm-up/Replay bootstrap
     initial_collect_steps: int | None = 2**17
     replay_capacity_total: int | None = 2**19
-    debug: bool = False
-    env_debug: bool = True
-    log_interval: int = 1_000
+    use_heuristic_warmup: bool = True
+
+    # Evaluation
     num_eval_episodes: int = 1
     eval_interval: int = 5_000
     log_eval_curves: bool = True
+
+    # Logging/Checkpoints
+    log_interval: int = 1_000
     checkpoint_interval: int | None = 5_000
+    debug: bool = False
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -43,46 +52,60 @@ train = _train
 
 def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Shape RL training CLI")
-    parser.add_argument("--num_updates", type=int, default=defaults.num_updates,
-                        help="Number of training updates")
-    parser.add_argument("--num_parallel_envs", type=int, default=defaults.num_parallel_envs,
-                        help="Number of parallel environments for training")
-    parser.add_argument("--batch_size", type=int, default=defaults.batch_size,
-                        help="Batch size for training updates")
-    parser.add_argument("--collect_steps_per_update", type=int, default=defaults.collect_steps_per_update,
-                        help="Steps collected per update across all environments")
-    parser.add_argument("--num_eval_episodes", type=int, default=defaults.num_eval_episodes,
-                        help="Episodes per evaluation run")
-    parser.add_argument("--eval_interval", type=int, default=defaults.eval_interval,
-                        help="Updates between evaluation runs")
-    parser.add_argument("--seed", type=int, default=defaults.seed,
-                        help="Random seed (omit to use library default stochastic behaviour)")
-    parser.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
-                        choices=["cnn", "spatial_softmax", "spatial_k"],
-                        help="Backbone encoder architecture for actor/critic")
-    parser.add_argument("--log_interval", type=int, default=defaults.log_interval,
-                        help="Updates between throughput logs")
-    parser.add_argument("--initial_collect_steps", type=int, default=defaults.initial_collect_steps,
-                        help="Warm-up transitions to gather before training (default auto-computed)")
-    parser.add_argument("--replay_capacity_total", type=int, default=defaults.replay_capacity_total,
-                        help="Total replay capacity (overrides default sizing computed from batch/parallel envs)")
-    parser.add_argument("--checkpoint_interval", type=int, default=defaults.checkpoint_interval,
-                        help="Updates between lightweight checkpoints (set to 0 to disable)")
-    parser.add_argument("--heuristic_warmup", dest="use_heuristic_warmup", action="store_true",
-                        help="Use heuristic policy to warm up the replay buffer")
-    parser.add_argument("--no_heuristic_warmup", dest="use_heuristic_warmup", action="store_false",
-                        help="Disable heuristic warm-up; rely on random actions")
-    parser.add_argument("--debug", dest="debug", action="store_true",
-                        help="Enable verbose environment logging and TensorBoard scalars")
-    parser.add_argument("--no_debug", dest="debug", action="store_false",
-                        help="Disable debug logging")
-    parser.add_argument("--env_debug", dest="env_debug", action="store_true",
-                        help="Enable env debug mode (passes through to SandShapingEnv)")
-    parser.add_argument("--no_env_debug", dest="env_debug", action="store_false",
-                        help="Disable env debug mode for faster execution")
-    parser.add_argument("--log_eval_curves", action="store_true",
-                        default=defaults.log_eval_curves,
-                        help="Enable per-step eval curve logging to TensorBoard (default: off)")
+    env_group = parser.add_argument_group("Environment")
+    env_group.add_argument("--seed", type=int, default=defaults.seed,
+                           help="Random seed (omit to use library default stochastic behaviour)")
+    env_group.add_argument("--num_parallel_envs", type=int, default=defaults.num_parallel_envs,
+                           help="Number of parallel environments for training")
+    env_group.add_argument("--env_debug", dest="env_debug", action="store_true",
+                           help="Enable env debug mode (passes through to SandShapingEnv)")
+    env_group.add_argument("--no_env_debug", dest="env_debug", action="store_false",
+                           help="Disable env debug mode for faster execution")
+
+    model_group = parser.add_argument_group("Model")
+    model_group.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
+                             choices=["cnn", "spatial_softmax", "spatial_k"],
+                             help="Backbone encoder architecture for actor/critic")
+
+    train_group = parser.add_argument_group("Training loop")
+    train_group.add_argument("--num_updates", type=int, default=defaults.num_updates,
+                             help="Number of training updates")
+    train_group.add_argument("--batch_size", type=int, default=defaults.batch_size,
+                             help="Batch size for training updates")
+    train_group.add_argument("--collect_steps_per_update", type=int, default=defaults.collect_steps_per_update,
+                             help="Steps collected per update across all environments")
+    train_group.add_argument("--learning_rate", type=float, default=defaults.learning_rate,
+                             help="Learning rate for actor/critic/alpha optimizers")
+
+    warmup_group = parser.add_argument_group("Warm-up/Replay")
+    warmup_group.add_argument("--replay_capacity_total", type=int, default=defaults.replay_capacity_total,
+                             help="Total replay capacity (overrides default sizing computed from batch/parallel envs)")
+    warmup_group.add_argument("--initial_collect_steps", type=int, default=defaults.initial_collect_steps,
+                              help="Warm-up transitions to gather before training (default auto-computed)")
+    warmup_group.add_argument("--heuristic_warmup", dest="use_heuristic_warmup", action="store_true",
+                              help="Use heuristic policy to warm up the replay buffer")
+    warmup_group.add_argument("--no_heuristic_warmup", dest="use_heuristic_warmup", action="store_false",
+                              help="Disable heuristic warm-up; rely on random actions")
+
+    eval_group = parser.add_argument_group("Evaluation")
+    eval_group.add_argument("--num_eval_episodes", type=int, default=defaults.num_eval_episodes,
+                            help="Episodes per evaluation run")
+    eval_group.add_argument("--eval_interval", type=int, default=defaults.eval_interval,
+                            help="Updates between evaluation runs")
+    eval_group.add_argument("--log_eval_curves", action="store_true",
+                            default=defaults.log_eval_curves,
+                            help="Enable per-step eval curve logging to TensorBoard (default: off)")
+
+    log_group = parser.add_argument_group("Logging/Checkpoints")
+    log_group.add_argument("--log_interval", type=int, default=defaults.log_interval,
+                           help="Updates between throughput logs")
+    log_group.add_argument("--checkpoint_interval", type=int, default=defaults.checkpoint_interval,
+                           help="Updates between lightweight checkpoints (set to 0 to disable)")
+    log_group.add_argument("--debug", dest="debug", action="store_true",
+                           help="Enable verbose environment logging and TensorBoard scalars")
+    log_group.add_argument("--no_debug", dest="debug", action="store_false",
+                           help="Disable debug logging")
+
     parser.set_defaults(
         use_heuristic_warmup=defaults.use_heuristic_warmup,
         debug=defaults.debug,
@@ -122,7 +145,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         replay_capacity_total=cfg.replay_capacity_total,
         log_eval_curves=cfg.log_eval_curves,
         checkpoint_interval=cfg.checkpoint_interval,
-        learning_rate = 1e-4
+        learning_rate=cfg.learning_rate,
     )
 
 
