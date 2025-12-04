@@ -72,14 +72,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._plateau_improve_tol   = plateau_improve_tol
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
-        self._volume_penalty_coeff = 3e-4
-        self._eps                  = 1e-6
-        self._global_weight        = 0.7
-        self._local_weight         = 0.3
-        self._wg, self._ws, self._wl = 0.4, 0.4, 0.2
-        self._k_deficit  = 2.0
-        self._k_overcut  = 0.5
-        self._alpha_over = 0.5
+        self._eps = 1e-6
+        self._lambda_surplus = 1.0   # weight on surplus MAE
+        self._lambda_deficit = 5.0   # stronger cost on deficits
+        self._beta_grad = 0.1        # light gradient match on surplus
+        self._k_deficit = 2.0        # penalty when deficits grow
+        self._k_overcut = 0.5        # penalty for cutting below target locally
+        self._alpha_over = 0.5       # overcut tolerance in depth units
         self._reward_scale = 10.0
         self._vol_reg = 0.1
 
@@ -152,14 +151,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
         patch = diff_map[y0:y1, x0:x1]
         return float(np.sqrt(np.mean(patch ** 2)))
 
-    def _surplus_rmse(self, diff_map: np.ndarray) -> float:
-        """RMSE over removable surplus only (diff > 0)."""
+    def _asym_height(self, diff_map: np.ndarray) -> tuple[float, float]:
+        """Carve-aware height costs: surplus MAE and quadratic deficit."""
         surplus = np.maximum(diff_map, 0.0)
-        return float(np.sqrt(np.mean(surplus * surplus)))
+        deficit = np.maximum(-diff_map, 0.0)
+        mae_surplus = float(np.mean(surplus))
+        quad_deficit = float(np.mean(deficit * deficit))
+        return mae_surplus, quad_deficit
 
-    def _deficit_volume(self, diff_map: np.ndarray) -> float:
-        """Total deficit magnitude (diff < 0)."""
-        return float(np.sum(np.maximum(-diff_map, 0.0)))
+    def _surplus_grad_l1(self, diff_map: np.ndarray) -> float:
+        """L1 gradient of surplus-only surface (structure without penalizing deficits)."""
+        surplus = np.maximum(diff_map, 0.0)
+        gy, gx = np.gradient(surplus)
+        return float(np.mean(np.abs(gy)) + np.mean(np.abs(gx)))
 
     def _diff_and_rmse(self):
         """Compute and return the current diff map and its global RMSE."""
@@ -351,8 +355,13 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Global & local RMSE before the press
         diff_before, err_g_before = self._diff_and_rmse()
         err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
-        rmse_sup_before = self._surplus_rmse(diff_before)
-        deficit_before = self._deficit_volume(diff_before)
+        mae_s_before, def_q_before = self._asym_height(diff_before)
+        grad_before = self._surplus_grad_l1(diff_before)
+        J_before = (
+            self._lambda_surplus * mae_s_before
+            + self._lambda_deficit * def_q_before
+            + self._beta_grad * grad_before
+        )
 
         # Apply press and measure removed volume
         removed, _ = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
@@ -361,20 +370,25 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Global & local RMSE after the press
         diff_after, err_g_after = self._diff_and_rmse()
         err_l_after  = self._local_rmse(diff_after, cx, cy, self._local_radius)
-        rmse_sup_after = self._surplus_rmse(diff_after)
-        deficit_after = self._deficit_volume(diff_after)
+        mae_s_after, def_q_after = self._asym_height(diff_after)
+        grad_after = self._surplus_grad_l1(diff_after)
+        J_after = (
+            self._lambda_surplus * mae_s_after
+            + self._lambda_deficit * def_q_after
+            + self._beta_grad * grad_after
+        )
         y0 = max(cy - self._local_radius, 0)
         y1 = min(cy + self._local_radius + 1, self._height)
         x0 = max(cx - self._local_radius, 0)
         x1 = min(cx + self._local_radius + 1, self._width)
         local_min_after = float(np.min(diff_after[y0:y1, x0:x1]))
         reward = self._compute_reward(
-            err_g_before, err_g_after,
-            rmse_sup_before, rmse_sup_after,
-            err_l_before, err_l_after,
-            deficit_before, deficit_after,
+            J_before, J_after,
+            def_q_before, def_q_after,
             removed_norm,
             local_min_after,
+            err_g_after,
+            err_l_after,
         )
 
         # Debug scalars (log once so both transition/termination paths share)
@@ -427,23 +441,19 @@ class SandShapingEnv(py_environment.PyEnvironment):
     #  Reward (potential-based shaping)                    #
     # ---------------------------------------------------- #
     def _compute_reward(self,
-                        err_g_before: float, err_g_after: float,
-                        rmse_sup_before: float, rmse_sup_after: float,
-                        err_l_before: float, err_l_after: float,
-                        deficit_before: float, deficit_after: float,
+                        J_before: float, J_after: float,
+                        def_q_before: float, def_q_after: float,
                         removed_norm: float,
-                        local_min_after: float) -> float:
-        # Relative improvements (normalized by per-episode initial error)
+                        local_min_after: float,
+                        err_g_after: float,
+                        err_l_after: float) -> float:
+        # Improvement of the carve-aware metric, normalized per episode.
         denom = max(self._err0, self._eps)
-        rel_g   = float(np.clip((err_g_before      - err_g_after)     / denom, -1.0, 1.0))
-        rel_sup = float(np.clip((rmse_sup_before   - rmse_sup_after)  / denom, -1.0, 1.0))
-        rel_loc = float(np.clip((err_l_before      - err_l_after)     / denom, -1.0, 1.0))
+        improve = float(np.clip((J_before - J_after) / denom, -1.0, 1.0))
 
-        improve = self._wg * rel_g + self._ws * rel_sup + self._wl * rel_loc
-
-        # Penalize new deficit and excessive overcut below target.
-        delta_deficit = deficit_after - deficit_before
-        deficit_pen = self._k_deficit * max(0.0, delta_deficit) / max(deficit_before + self._eps, 1.0)
+        # Penalize new deficit (quadratic cost) and local overcut depth.
+        delta_def_q = def_q_after - def_q_before
+        deficit_pen = self._k_deficit * max(0.0, delta_def_q) / max(def_q_before + self._eps, 1.0)
         overcut = max(0.0, -(local_min_after + self._alpha_over * self._depth_unit)) / max(self._depth_unit, self._eps)
         overcut_pen = self._k_overcut * overcut
 
@@ -456,15 +466,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         if self.debug:
             self._last_reward_terms = {
-                'rel_g': rel_g,
-                'rel_sup': rel_sup,
-                'rel_loc': rel_loc,
                 'improve': improve,
                 'deficit_pen': float(deficit_pen),
                 'overcut_pen': float(overcut_pen),
                 'removed_norm': float(removed_norm),
-                'delta_deficit': float(delta_deficit),
+                'delta_def_q': float(delta_def_q),
                 'overcut': float(overcut),
+                'J_before': float(J_before),
+                'J_after': float(J_after),
             }
             self._last_reward = float(reward)
             self._last_err_global = float(err_g_after)
