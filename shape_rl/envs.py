@@ -76,6 +76,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._eps                  = 1e-6
         self._global_weight        = 0.7
         self._local_weight         = 0.3
+        self._wg, self._ws, self._wl = 0.4, 0.4, 0.2
+        self._k_deficit  = 2.0
+        self._k_overcut  = 0.5
+        self._alpha_over = 0.5
+        self._reward_scale = 10.0
+        self._vol_reg = 0.1
 
         self._local_radius = 1 * self._tool_radius
         self._max_press_volume = self._compute_max_press_volume()
@@ -145,6 +151,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
         x1 = min(cx + r + 1, self._width)
         patch = diff_map[y0:y1, x0:x1]
         return float(np.sqrt(np.mean(patch ** 2)))
+
+    def _surplus_rmse(self, diff_map: np.ndarray) -> float:
+        """RMSE over removable surplus only (diff > 0)."""
+        surplus = np.maximum(diff_map, 0.0)
+        return float(np.sqrt(np.mean(surplus * surplus)))
+
+    def _deficit_volume(self, diff_map: np.ndarray) -> float:
+        """Total deficit magnitude (diff < 0)."""
+        return float(np.sum(np.maximum(-diff_map, 0.0)))
 
     def _diff_and_rmse(self):
         """Compute and return the current diff map and its global RMSE."""
@@ -336,22 +351,35 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Global & local RMSE before the press
         diff_before, err_g_before = self._diff_and_rmse()
         err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
+        rmse_sup_before = self._surplus_rmse(diff_before)
+        deficit_before = self._deficit_volume(diff_before)
 
         # Apply press and measure removed volume
         removed, _ = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
+        removed_norm = float(np.clip(removed / (self._max_press_volume + self._eps), 0.0, 1.0))
 
         # Global & local RMSE after the press
         diff_after, err_g_after = self._diff_and_rmse()
         err_l_after  = self._local_rmse(diff_after, cx, cy, self._local_radius)
+        rmse_sup_after = self._surplus_rmse(diff_after)
+        deficit_after = self._deficit_volume(diff_after)
+        y0 = max(cy - self._local_radius, 0)
+        y1 = min(cy + self._local_radius + 1, self._height)
+        x0 = max(cx - self._local_radius, 0)
+        x1 = min(cx + self._local_radius + 1, self._width)
+        local_min_after = float(np.min(diff_after[y0:y1, x0:x1]))
         reward = self._compute_reward(
             err_g_before, err_g_after,
+            rmse_sup_before, rmse_sup_after,
             err_l_before, err_l_after,
-            removed
+            deficit_before, deficit_after,
+            removed_norm,
+            local_min_after,
         )
 
         # Debug scalars (log once so both transition/termination paths share)
         if self.debug:
-            self._last_removed_norm = removed / (self._max_press_volume + self._eps)
+            self._last_removed_norm = removed_norm
             self._last_removed = removed
             self._last_rel_improve = (err_g_before - err_g_after) / (err_g_before + self._eps)
             self._last_reward = reward
@@ -400,37 +428,43 @@ class SandShapingEnv(py_environment.PyEnvironment):
     # ---------------------------------------------------- #
     def _compute_reward(self,
                         err_g_before: float, err_g_after: float,
+                        rmse_sup_before: float, rmse_sup_after: float,
                         err_l_before: float, err_l_after: float,
-                        removed: float) -> float:
-        # --- Relative improvements (normalized per-episode/scale-free) ---
+                        deficit_before: float, deficit_after: float,
+                        removed_norm: float,
+                        local_min_after: float) -> float:
+        # Relative improvements (normalized by per-episode initial error)
         denom = max(self._err0, self._eps)
-        rel_g = (err_g_before - err_g_after) / denom
-        rel_l = (err_l_before - err_l_after) / denom
-        rel_g = float(np.clip(rel_g, -1.0, 1.0))
-        rel_l = float(np.clip(rel_l, -1.0, 1.0))
-        improve = self._global_weight * rel_g + self._local_weight * rel_l
-        # Scale overall reward to a healthier magnitude for learning
-        reward_scale = 10.0
+        rel_g   = float(np.clip((err_g_before      - err_g_after)     / denom, -1.0, 1.0))
+        rel_sup = float(np.clip((rmse_sup_before   - rmse_sup_after)  / denom, -1.0, 1.0))
+        rel_loc = float(np.clip((err_l_before      - err_l_after)     / denom, -1.0, 1.0))
 
-        # --- Gentle, sign-aware volume shaping (normalized) ---
-        removed_norm = removed / (self._max_press_volume + self._eps)
-        removed_norm = float(np.clip(removed_norm, 0.0, 1.0))
+        improve = self._wg * rel_g + self._ws * rel_sup + self._wl * rel_loc
 
-        gain = max(improve, 0.0)
-        loss = max(-improve, 0.0)
-        pos_bonus = self._volume_penalty_coeff * removed_norm * gain
-        neg_pen   = 2.0 * self._volume_penalty_coeff * removed_norm * loss  # asymmetric, stronger when harming
+        # Penalize new deficit and excessive overcut below target.
+        delta_deficit = deficit_after - deficit_before
+        deficit_pen = self._k_deficit * max(0.0, delta_deficit) / max(deficit_before + self._eps, 1.0)
+        overcut = max(0.0, -(local_min_after + self._alpha_over * self._depth_unit)) / max(self._depth_unit, self._eps)
+        overcut_pen = self._k_overcut * overcut
 
-        reward = reward_scale * improve + pos_bonus - neg_pen
+        reward = (
+            self._reward_scale * improve
+            - deficit_pen
+            - overcut_pen
+            - self._vol_reg * removed_norm
+        )
 
         if self.debug:
             self._last_reward_terms = {
                 'rel_g': rel_g,
-                'rel_l': rel_l,
+                'rel_sup': rel_sup,
+                'rel_loc': rel_loc,
                 'improve': improve,
+                'deficit_pen': float(deficit_pen),
+                'overcut_pen': float(overcut_pen),
                 'removed_norm': float(removed_norm),
-                'pos_bonus': float(pos_bonus),
-                'neg_pen': float(neg_pen),
+                'delta_deficit': float(delta_deficit),
+                'overcut': float(overcut),
             }
             self._last_reward = float(reward)
             self._last_err_global = float(err_g_after)
