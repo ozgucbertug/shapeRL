@@ -54,6 +54,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._s_lap  = 1.0
         self._s_env_h = 1.0
         self._s_tgt_h = 1.0
+        self._s_grad_canon = 1.0
+        self._s_lap_canon = 1.0
 
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
@@ -201,12 +203,17 @@ class SandShapingEnv(py_environment.PyEnvironment):
         return lap
 
     def _update_grad_lap(self, diff_canon: np.ndarray):
-        """Update gradient magnitude and Laplacian buffers in canonical units."""
+        """Update gradient magnitude and Laplacian buffers with per-episode scaling."""
         gy, gx = np.gradient(diff_canon)
         np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff| in canonical units per pixel
+        # Normalize by robust per-episode scale to stabilize magnitudes
+        denom_grad = max(self._s_grad_canon, self._eps)
+        self._grad_buf /= denom_grad
         np.clip(self._grad_buf, 0.0, 5.0, out=self._grad_buf)
 
         lap = self._laplacian(diff_canon)  # writes into self._lap_buf
+        denom_lap = max(self._s_lap_canon, self._eps)
+        self._lap_buf /= denom_lap
         np.clip(self._lap_buf, -5.0, 5.0, out=self._lap_buf)
 
     def _disk_stats(self, diff: np.ndarray, cx: int, cy: int) -> tuple[float, float, float]:
@@ -344,10 +351,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         gy, gx = np.gradient(diff)
         grad_mag = np.sqrt(gy * gy + gx * gx)
         self._s_grad = float(max(self._eps, np.percentile(grad_mag, 95.0)))
+        self._s_grad_canon = self._s_grad / max(self._depth_unit, self._eps)
 
         lap = self._laplacian(diff)  # writes into self._lap_buf
         abs_lap = np.abs(lap)
         self._s_lap = float(max(self._eps, np.percentile(abs_lap, 95.0)))
+        self._s_lap_canon = self._s_lap / max(self._depth_unit, self._eps)
 
         # Initial global error
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
