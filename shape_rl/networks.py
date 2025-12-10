@@ -267,7 +267,7 @@ class SpatialSoftmaxEncoder(layers.Layer):
 
     def __init__(
         self,
-        filters: tuple[int, ...] = (32, 64, 128),
+        filters: tuple[int, ...] = (48, 96, 192),
         latent_dim: int = 128,
         return_feature_maps: bool = False,
         use_heatmap: bool = True,
@@ -278,7 +278,8 @@ class SpatialSoftmaxEncoder(layers.Layer):
         self._num_obs_channels = int(num_obs_channels) if num_obs_channels is not None else None
         self.blocks = []
         for idx, f in enumerate(filters):
-            stride = 1 if idx == 0 else 2
+            # Downsample only once (2x) to keep a ~64x64 heatmap for 128x128 inputs.
+            stride = 2 if idx == 1 else 1
             self.blocks.append(_ConvBlock(f, stride=stride))
         self._use_heatmap = use_heatmap
         if self._use_heatmap:
@@ -325,7 +326,7 @@ class SpatialFiLMEncoder(layers.Layer):
 
     def __init__(
         self,
-        filters: tuple[int, ...] = (32, 64, 128),
+        filters: tuple[int, ...] = (48, 96, 192),
         latent_dim: int = 128,
         return_feature_maps: bool = False,
         use_heatmap: bool = True,
@@ -338,7 +339,8 @@ class SpatialFiLMEncoder(layers.Layer):
         self._num_obs_channels = int(num_obs_channels) if num_obs_channels is not None else None
         self.blocks = []
         for idx, f in enumerate(filters):
-            stride = 1 if idx == 0 else 2
+            # Downsample only once (2x) to keep a ~64x64 heatmap for 128x128 inputs.
+            stride = 2 if idx == 1 else 1
             self.blocks.append(FiLMConvBlock(f, stride=stride))
         self._use_heatmap = use_heatmap
         if self._use_heatmap:
