@@ -24,7 +24,8 @@ def normalized_auc(series: list[float] | np.ndarray) -> float:
     s = np.asarray(series, dtype=np.float64)
     if s.size <= 1:
         return 0.0
-    denom = (s.size - 1) * max(abs(float(s[0])), 1e-12)
+    # Scale by total steps and initial magnitude to reflect per-step mean area
+    denom = max(s.size, 1) * max(abs(float(s[0])), 1e-12)
     return float(np.trapz(s) / denom)
 
 
@@ -243,8 +244,9 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
 def summarize_metric_series(series: Sequence[float], pos_tol: float = 1e-9) -> Dict[str, float]:
     """
     Derive scalar summary statistics from a per-step metric series.
-    Returns deltas, slopes, normalized AUC, relative improvement, and the
-    fraction of steps with positive (decreasing) improvements.
+    Returns deltas (normalized by initial magnitude), slopes (normalized),
+    normalized AUC (per-step, normalized by initial), relative improvement,
+    and the fraction of steps with positive (decreasing) improvements.
     """
     fallback = {
         'initial': -1.0,
@@ -275,15 +277,18 @@ def summarize_metric_series(series: Sequence[float], pos_tol: float = 1e-9) -> D
     if values.size == 0:
         return fallback
 
+    scale = max(abs(float(values[0])), 1e-6)
     steps = start_idx + np.arange(values.size, dtype=np.float64)
     initial = float(values[0])
     final = float(values[-1])
-    delta = initial - final
-    slope = float(np.polyfit(steps, values, 1)[0]) if values.size >= 2 else 0.0
+    raw_delta = initial - final
+    delta = raw_delta / scale
+    slope_raw = float(np.polyfit(steps, values, 1)[0]) if values.size >= 2 else 0.0
+    slope = slope_raw / scale
     auc_norm = normalized_auc(values.tolist())
     diffs = np.diff(values)
     pos_improve_frac = float(np.mean(diffs < -pos_tol)) if diffs.size > 0 else 0.0
-    rel_improvement = delta / max(abs(initial), 1e-6)
+    rel_improvement = raw_delta / scale
     return {
         'initial': initial,
         'final': final,

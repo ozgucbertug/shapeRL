@@ -304,7 +304,7 @@ def train(
         tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=step_val)
         tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=step_val)
         if steps_mean is not None:
-            tf.summary.scalar('eval/steps_mean', steps_mean, step=step_val)
+            tf.summary.scalar('eval/_steps_mean', steps_mean, step=step_val)
 
         return rmse_summary, mae_summary, w2_summary
 
