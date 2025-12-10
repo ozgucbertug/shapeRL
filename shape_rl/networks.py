@@ -271,9 +271,11 @@ class SpatialSoftmaxEncoder(layers.Layer):
         latent_dim: int = 128,
         return_feature_maps: bool = False,
         use_heatmap: bool = True,
+        num_obs_channels: int | None = 5,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self._num_obs_channels = int(num_obs_channels) if num_obs_channels is not None else None
         self.blocks = []
         for idx, f in enumerate(filters):
             stride = 1 if idx == 0 else 2
@@ -293,6 +295,8 @@ class SpatialSoftmaxEncoder(layers.Layer):
         self, inputs: tf.Tensor, training: bool | None = None
     ) -> tuple[tf.Tensor, tf.Tensor] | tuple[tf.Tensor, tf.Tensor, tuple[tf.Tensor, ...]]:
         x = tf.cast(inputs, tf.float32)
+        if self._num_obs_channels is not None:
+            x = x[..., : self._num_obs_channels]
         feature_maps: list[tf.Tensor] = []
         for block in self.blocks:
             x = block(x, training=training)
@@ -327,9 +331,11 @@ class SpatialFiLMEncoder(layers.Layer):
         use_heatmap: bool = True,
         include_diff_stat: bool = True,
         film_hidden: int = 64,
+        num_obs_channels: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self._num_obs_channels = int(num_obs_channels) if num_obs_channels is not None else None
         self.blocks = []
         for idx, f in enumerate(filters):
             stride = 1 if idx == 0 else 2
@@ -360,6 +366,8 @@ class SpatialFiLMEncoder(layers.Layer):
         self, inputs: tf.Tensor, training: bool | None = None
     ) -> tuple[tf.Tensor, tf.Tensor] | tuple[tf.Tensor, tf.Tensor, tuple[tf.Tensor, ...]]:
         x = tf.cast(inputs, tf.float32)
+        if self._num_obs_channels is not None:
+            x = x[..., : self._num_obs_channels]
         cond_vec = self._conditioning_vector(x)
         gamma, beta = self.conditioner(cond_vec)
 
@@ -413,8 +421,7 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
-        latent, _, feature_maps = self.encoder(encoder_input, training=training)
+        latent, _, feature_maps = self.encoder(obs, training=training)
         xy = acts[..., :2]
         action_latent = self.action_fc(acts)
 
@@ -457,8 +464,7 @@ class SpatialValueMapCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
-        latent, _, feature_maps = self.encoder(encoder_input, training=training)
+        latent, _, feature_maps = self.encoder(obs, training=training)
         feat_map = feature_maps[-1]
         xy = acts[..., :2]
         dz = acts[..., 2:3]
@@ -520,8 +526,7 @@ class SpatialSoftmaxActorNetwork(network.Network):
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
-        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
-        latent, xy, feature_maps = self.encoder(encoder_input, training=training)
+        latent, xy, feature_maps = self.encoder(obs, training=training)
         local_feat = sample_feature_maps(feature_maps, xy)
         diff_xy, grad_xy, lap_xy, scale_token = sample_obs_scalars(obs, xy)
         local_feat = tf.concat([local_feat, diff_xy, grad_xy, lap_xy, scale_token], axis=-1)
@@ -565,7 +570,10 @@ class SpatialKActorNetwork(network.Network):
             raise ValueError('SpatialKActorNetwork expects action spec with shape [3].')
         self._K = int(K)
 
-        self.encoder = encoder_cls(return_feature_maps=True, use_heatmap=False)
+        self.encoder = encoder_cls(
+            return_feature_maps=True,
+            use_heatmap=False,
+        )
         self.heatmap_head = layers.Conv2D(self._K, 1, padding='same', name='mixture_heatmap_head')
         self.spatial_softmax = SpatialSoftmax()
 
@@ -618,8 +626,7 @@ class SpatialKActorNetwork(network.Network):
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
-        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
-        latent, _, feature_maps = self.encoder(encoder_input, training=training)
+        latent, _, feature_maps = self.encoder(obs, training=training)
         final_map = feature_maps[-1]
 
         heatmap_logits = self.heatmap_head(final_map)
