@@ -180,6 +180,7 @@ def train(
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
+    alpha_lr = learning_rate * 0.3
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
@@ -188,12 +189,15 @@ def train(
         critic_network_2=critic_net_2,
         actor_optimizer=Adam(learning_rate, clipnorm=1.0),
         critic_optimizer=Adam(learning_rate, clipnorm=1.0),
-        alpha_optimizer=Adam(learning_rate, clipnorm=1.0),
-        target_update_tau=0.005,
+        # Lower alpha LR and explicit target entropy to steady exploration temperature
+        alpha_optimizer=Adam(alpha_lr, clipnorm=1.0),
+        target_entropy=-3.0,
+        target_update_tau=0.002,
         target_update_period=1,
         td_errors_loss_fn=tf.math.squared_difference,
         gamma=gamma,
-        reward_scale_factor=1.0,
+        # Slightly reduced reward scale factor to calm TD targets
+        reward_scale_factor=0.7,
         train_step_counter=global_step
     )
     tf_agent.initialize()

@@ -21,10 +21,10 @@ class TrainingConfig:
     encoder_type: str = 'spatial_softmax'
 
     # Training loop
-    num_updates: int = 200_000
+    num_updates: int = 250_000
     batch_size: int = 512
     collect_steps_per_update: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
 
     # Warm-up/Replay bootstrap
     initial_collect_steps: int | None = 2**17

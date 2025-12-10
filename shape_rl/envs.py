@@ -73,10 +73,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
         self._eps                  = 1e-6
-        self._k_deficit  = 2.0
-        self._k_overcut  = 0.5
+        # Softer penalties and reward scale to stabilize critic targets
+        self._k_deficit  = 1.5
+        self._k_overcut  = 0.35
         self._alpha_over = 0.5
-        self._reward_scale = 10.0
+        self._reward_scale = 6.0
         self._vol_reg = 0.1
 
         # Additional reward shaping / safety weights
