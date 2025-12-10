@@ -8,6 +8,19 @@ from keras import layers
 from tf_agents.networks import network
 import tensorflow_probability as tfp
 
+
+# ==========================================================================
+# Helpers
+# ==========================================================================
+
+
+def make_tanh_squash_bijector() -> tfp.bijectors.Bijector:
+    """Shared bijector used to squash Gaussian actions into [0, 1]^3."""
+    return tfp.bijectors.Chain(
+        [tfp.bijectors.Shift(0.5), tfp.bijectors.Scale(0.5), tfp.bijectors.Tanh()]
+    )
+
+
 def bilinear_sample_nhwc(feat: tf.Tensor, xy01: tf.Tensor) -> tf.Tensor:
     """Samples per-location features from an NHWC map using normalized coords.
 
@@ -62,14 +75,13 @@ def bilinear_sample_nhwc(feat: tf.Tensor, xy01: tf.Tensor) -> tf.Tensor:
     return wa * Ia + wb * Ib + wc * Ic + wd * Id
 
 
-class SpatialSoftmax(layers.Layer):
-    """Computes spatial expectation for heatmap logits with bounded temperature.
+# ==========================================================================
+# Encoders
+# ==========================================================================
 
-    Lower temperatures sharpen the softmax distribution, while higher temperatures
-    produce smoother, more diffuse expectations. Temperature is constrained to a
-    configurable range via a sigmoid, to avoid degenerate over-sharp or over-diffuse
-    regimes while remaining fully differentiable.
-    """
+
+class SpatialSoftmax(layers.Layer):
+    """Computes spatial expectation for heatmap logits with bounded temperature."""
 
     def __init__(
         self,
@@ -86,17 +98,14 @@ class SpatialSoftmax(layers.Layer):
             raise ValueError("min_temperature must be positive.")
         if not (min_temperature < max_temperature):
             raise ValueError("min_temperature must be < max_temperature.")
-        # Clamp the requested initial temperature to bounds
         t0 = float(temperature)
         tmin = float(min_temperature)
         tmax = float(max_temperature)
         t0 = min(max(t0, tmin), tmax)
-        # Inverse of: T = Tmin + (Tmax-Tmin) * sigmoid(alpha)
         ratio = (t0 - tmin) / (tmax - tmin + 1e-12)
         ratio = min(max(ratio, 1e-6), 1.0 - 1e-6)
         initial_alpha = math.log(ratio / (1.0 - ratio))
 
-        # Unconstrained parameter that we squash into [Tmin, Tmax]
         self._temp_alpha = self.add_weight(
             name='temp_alpha',
             shape=(),
@@ -109,16 +118,13 @@ class SpatialSoftmax(layers.Layer):
         self._initial_temperature = t0
         self._learnable = bool(learnable)
         self._reg_coeff = float(reg_coeff)
-        # If None, regularize toward mid-range temperature
         self._target_temperature = float(target_temperature) if target_temperature is not None else None
 
     def _current_temperature(self) -> tf.Tensor:
-        # Differentiable mapping into [Tmin, Tmax]
         p = tf.nn.sigmoid(self._temp_alpha)
         return self._tmin + (self._tmax - self._tmin) * p
 
     def current_temperature(self) -> tf.Tensor:
-        """Public accessor for the current (bounded) temperature tensor."""
         return tf.identity(self._current_temperature(), name="spatialsoftmax_temperature")
 
     def call(self, logits: tf.Tensor) -> tf.Tensor:
@@ -131,22 +137,18 @@ class SpatialSoftmax(layers.Layer):
         flat = tf.reshape(logits, [batch, height * width])
         temperature = self._current_temperature()
         scaled = flat / temperature
-        # Stabilize softmax by subtracting per-batch max
         max_per_batch = tf.reduce_max(scaled, axis=-1, keepdims=True)
         normalized = scaled - max_per_batch
         weights = tf.nn.softmax(normalized)
 
-        # Optional gentle regularization to discourage extreme temperatures
         if self._reg_coeff > 0.0:
             target_T = (
                 tf.constant(0.5 * (self._tmin + self._tmax), dtype=tf.float32)
                 if self._target_temperature is None
                 else tf.constant(float(self._target_temperature), dtype=tf.float32)
             )
-            # Normalize by range so the magnitude is consistent across settings
             rng = tf.constant(self._tmax - self._tmin, dtype=tf.float32)
             reg = ((temperature - target_T) / (rng + 1e-12)) ** 2
-            # Add as a per-batch mean to layer losses
             self.add_loss(self._reg_coeff * tf.reduce_mean(reg))
 
         xs = tf.linspace(0.0, 1.0, width)
@@ -172,18 +174,12 @@ class SpatialSoftmax(layers.Layer):
         return config
 
 
-# ==========================================================================
-#  Spatial-softmax encoder family
-# ==========================================================================
-
-
 class _ConvBlock(layers.Layer):
     """Conv-GN-ReLU block with configurable stride."""
 
     def __init__(self, filters: int, stride: int = 1, **kwargs):
         super().__init__(**kwargs)
         self.conv = layers.Conv2D(filters, 3, strides=stride, padding='same')
-        # Use GN with groups chosen by channel count
         groups = 16 if filters >= 64 else (8 if filters >= 32 else 4)
         self.norm = layers.GroupNormalization(groups=groups, axis=-1, epsilon=1e-5)
         self.act = layers.Activation('relu')
@@ -195,11 +191,12 @@ class _ConvBlock(layers.Layer):
 
 
 class SpatialSoftmaxEncoder(layers.Layer):
+    """CNN backbone that predicts a spatial expectation alongside a latent vector."""
+
     def current_temperature(self) -> tf.Tensor | None:
         if self._use_heatmap and self.spatial_softmax is not None:
             return self.spatial_softmax.current_temperature()
         return None
-    """CNN backbone that predicts a spatial expectation alongside a latent vector."""
 
     def __init__(
         self,
@@ -247,58 +244,9 @@ class SpatialSoftmaxEncoder(layers.Layer):
         return latent, xy
 
 
-class SpatialSoftmaxActorNetwork(network.Network):
-    def current_temperature(self) -> tf.Tensor | None:
-        return self.encoder.current_temperature()
-    """Actor that anchors xy means using a spatial softmax heatmap."""
-
-    def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxActorNetwork'):
-        super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
-        self._action_spec = action_spec
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
-        self.fc1 = layers.Dense(128, activation='elu')
-        self.fc2 = layers.Dense(64, activation='elu')
-        self.depth_fc = layers.Dense(64, activation='elu')
-        self.dz_head = layers.Dense(1)
-        action_dims = action_spec.shape[0]
-        self.mean_residual = layers.Dense(action_dims)
-        self.logstd_head = layers.Dense(action_dims)
-
-    def call(self, observations, step_type=None, network_state=(), training: bool = False):
-        obs = tf.cast(observations, tf.float32)
-        latent, xy, feature_maps = self.encoder(obs[..., :5], training=training)
-        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
-        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
-        diff_xy = bilinear_sample_nhwc(obs[..., 0:1], xy)
-        grad_xy = bilinear_sample_nhwc(obs[..., 3:4], xy)
-        lap_xy = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        # Global scale token is constant per episode; reduce over spatial dims.
-        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
-        local_feat = tf.concat([local_feat, diff_xy, grad_xy, lap_xy, scale_token], axis=-1)
-        fused_in = tf.concat([latent, xy, scale_token], axis=-1)
-        fused = self.fc1(fused_in)
-        fused = self.fc2(fused)
-
-        xy_clipped = tf.clip_by_value(xy, 1e-3, 1.0 - 1e-3)
-        xy_pre = tf.clip_by_value(2.0 * xy_clipped - 1.0, -0.999, 0.999)
-        xy_base = tf.math.atanh(xy_pre)
-        # Remove duplicated scalar concatenations in the depth head to keep inputs lean
-        depth_in = tf.concat([fused, local_feat], axis=-1)
-        depth_h = self.depth_fc(depth_in)
-        dz_base = self.dz_head(depth_h)
-        base_mean = tf.concat([xy_base, dz_base], axis=-1)
-        mean = base_mean + self.mean_residual(fused)
-
-        logstd = self.logstd_head(fused)
-        logstd = tf.clip_by_value(logstd, -3.0, 1.0)
-        scale = tf.nn.softplus(logstd) + 1e-3
-
-        base = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=scale)
-        bijector = tfp.bijectors.Chain(
-            [tfp.bijectors.Shift(0.5), tfp.bijectors.Scale(0.5), tfp.bijectors.Tanh()]
-        )
-        dist = tfp.distributions.TransformedDistribution(base, bijector)
-        return dist, network_state
+# ==========================================================================
+# Critics
+# ==========================================================================
 
 
 class SpatialSoftmaxCriticNetwork(network.Network):
@@ -326,8 +274,7 @@ class SpatialSoftmaxCriticNetwork(network.Network):
 
         diff = bilinear_sample_nhwc(obs[..., 0:1], xy)
         grad = bilinear_sample_nhwc(obs[..., 3:4], xy)
-        lap  = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        # Global scale token is constant per episode; reduce over spatial dims.
+        lap = bilinear_sample_nhwc(obs[..., 4:5], xy)
         scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
         sampled_scalars = tf.concat([diff, grad, lap, scale_token], axis=-1)
 
@@ -336,6 +283,110 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         fused = self.fc2(fused)
         q = self.q_head(fused)
         return tf.squeeze(q, axis=-1), network_state
+
+
+class SpatialValueMapCriticNetwork(network.Network):
+    """Critic that predicts a spatial value map and samples it at the commanded (x, y)."""
+
+    def __init__(self, observation_spec, action_spec, name: str = 'SpatialValueMapCriticNetwork'):
+        super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
+        self.encoder = SpatialSoftmaxEncoder(
+            latent_dim=128,
+            return_feature_maps=True,
+            use_heatmap=False,
+        )
+        self.action_fc = layers.Dense(64, activation='relu')
+        self.latent_fc = layers.Dense(64, activation='relu')
+        self.fuse_fc = layers.Dense(64, activation='relu')
+        self.q_bias = layers.Dense(1)
+        self.conv1 = layers.Conv2D(64, 3, padding='same', activation='relu')
+        self.conv2 = layers.Conv2D(1, 1, padding='same')
+
+    def call(self, inputs, step_type=None, network_state=(), training: bool = False):
+        observations, actions = inputs
+        obs = tf.cast(observations, tf.float32)
+        acts = tf.cast(actions, tf.float32)
+
+        latent, _, feature_maps = self.encoder(obs[..., :5], training=training)
+        feat_map = feature_maps[-1]
+        xy = acts[..., :2]
+        dz = acts[..., 2:3]
+
+        height = tf.shape(feat_map)[1]
+        width = tf.shape(feat_map)[2]
+
+        depth_plane = tf.tile(dz[:, None, None, :], [1, height, width, 1])
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2], keepdims=True)
+        scale_plane = tf.tile(scale_token, [1, height, width, 1])
+
+        fused_map = tf.concat([feat_map, depth_plane, scale_plane], axis=-1)
+        value_map = self.conv2(self.conv1(fused_map))
+
+        q_spatial = bilinear_sample_nhwc(value_map, xy)
+        q_spatial = tf.squeeze(q_spatial, axis=-1)
+
+        act_latent = self.action_fc(acts)
+        lat_latent = self.latent_fc(latent)
+        fused = self.fuse_fc(tf.concat([lat_latent, act_latent], axis=-1))
+        q_bias = tf.squeeze(self.q_bias(fused), axis=-1)
+
+        q = q_spatial + q_bias
+        return q, network_state
+
+
+# ==========================================================================
+# Actors
+# ==========================================================================
+
+
+class SpatialSoftmaxActorNetwork(network.Network):
+    """Actor that anchors xy means using a spatial softmax heatmap."""
+
+    def current_temperature(self) -> tf.Tensor | None:
+        return self.encoder.current_temperature()
+
+    def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxActorNetwork'):
+        super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
+        self._action_spec = action_spec
+        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
+        self.fc1 = layers.Dense(128, activation='elu')
+        self.fc2 = layers.Dense(64, activation='elu')
+        self.depth_fc = layers.Dense(64, activation='elu')
+        self.dz_head = layers.Dense(1)
+        action_dims = action_spec.shape[0]
+        self.mean_residual = layers.Dense(action_dims)
+        self.logstd_head = layers.Dense(action_dims)
+
+    def call(self, observations, step_type=None, network_state=(), training: bool = False):
+        obs = tf.cast(observations, tf.float32)
+        latent, xy, feature_maps = self.encoder(obs[..., :5], training=training)
+        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
+        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
+        diff_xy = bilinear_sample_nhwc(obs[..., 0:1], xy)
+        grad_xy = bilinear_sample_nhwc(obs[..., 3:4], xy)
+        lap_xy = bilinear_sample_nhwc(obs[..., 4:5], xy)
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
+        local_feat = tf.concat([local_feat, diff_xy, grad_xy, lap_xy, scale_token], axis=-1)
+        fused_in = tf.concat([latent, xy, scale_token], axis=-1)
+        fused = self.fc1(fused_in)
+        fused = self.fc2(fused)
+
+        xy_clipped = tf.clip_by_value(xy, 1e-3, 1.0 - 1e-3)
+        xy_pre = tf.clip_by_value(2.0 * xy_clipped - 1.0, -0.999, 0.999)
+        xy_base = tf.math.atanh(xy_pre)
+        depth_in = tf.concat([fused, local_feat], axis=-1)
+        depth_h = self.depth_fc(depth_in)
+        dz_base = self.dz_head(depth_h)
+        base_mean = tf.concat([xy_base, dz_base], axis=-1)
+        mean = base_mean + self.mean_residual(fused)
+
+        logstd = self.logstd_head(fused)
+        logstd = tf.clip_by_value(logstd, -3.0, 1.0)
+        scale = tf.nn.softplus(logstd) + 1e-3
+
+        base = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=scale)
+        dist = tfp.distributions.TransformedDistribution(base, make_tanh_squash_bijector())
+        return dist, network_state
 
 
 class SpatialKActorNetwork(network.Network):
@@ -380,9 +431,7 @@ class SpatialKActorNetwork(network.Network):
             initializer=tf.keras.initializers.Constant(-1.0),
             trainable=True,
         )
-        self._bijector = tfp.bijectors.Chain(
-            [tfp.bijectors.Shift(0.5), tfp.bijectors.Scale(0.5), tfp.bijectors.Tanh()]
-        )
+        self._bijector = make_tanh_squash_bijector()
 
     def current_temperature(self) -> tf.Tensor | None:
         return self.spatial_softmax.current_temperature()
@@ -451,8 +500,7 @@ class SpatialKActorNetwork(network.Network):
         diff_stack = tf.stack(diff_samples, axis=1)
         grad_stack = tf.stack(grad_samples, axis=1)
         lap_stack = tf.stack(lap_samples, axis=1)
-        # scale token is constant per episode; tile across modes
-        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])           # [B,1]
+        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
         tok_scale_stack = tf.tile(scale_token[:, None, :], [1, self._K, 1])
         sampled_scalars = tf.concat([diff_stack, grad_stack, lap_stack, tok_scale_stack], axis=-1)
         sampled_flat = tf.reshape(sampled_scalars, [-1, self._K * (3 + 1)])
@@ -482,7 +530,8 @@ class SpatialKActorNetwork(network.Network):
 __all__ = [
     'SpatialSoftmax',
     'SpatialSoftmaxEncoder',
+    'SpatialSoftmaxCriticNetwork',
+    'SpatialValueMapCriticNetwork',
     'SpatialSoftmaxActorNetwork',
     'SpatialKActorNetwork',
-    'SpatialSoftmaxCriticNetwork',
 ]

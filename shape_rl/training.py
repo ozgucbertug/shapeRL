@@ -37,6 +37,7 @@ from shape_rl.networks import (
     SpatialKActorNetwork,
     SpatialSoftmaxActorNetwork,
     SpatialSoftmaxCriticNetwork,
+    SpatialValueMapCriticNetwork,
 )
 
 __all__ = ["train"]
@@ -137,19 +138,19 @@ def train(
 
     if encoder_type == 'spatial_softmax':
         actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
-        critic_net_1 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_1'
         )
-        critic_net_2 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_2'
         )
     elif encoder_type == 'spatial_k':
         actor_net = SpatialKActorNetwork(observation_spec, action_spec)
-        critic_net_1 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_1'
         )
-        critic_net_2 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_2'
         )
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
