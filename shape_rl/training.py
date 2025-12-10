@@ -36,8 +36,10 @@ from datetime import datetime
 from shape_rl.networks import (
     SpatialKActorNetwork,
     SpatialSoftmaxActorNetwork,
-    SpatialSoftmaxCriticNetwork,
+    # SpatialSoftmaxCriticNetwork,
     SpatialValueMapCriticNetwork,
+    SpatialSoftmaxEncoder,
+    SpatialFiLMEncoder,
 )
 
 __all__ = ["train"]
@@ -137,20 +139,84 @@ def train(
     action_spec = train_env.action_spec()
 
     if encoder_type == 'spatial_softmax':
-        actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
+        actor_net = SpatialSoftmaxActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
         critic_net_1 = SpatialValueMapCriticNetwork(
-            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_1'
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
         )
         critic_net_2 = SpatialValueMapCriticNetwork(
-            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_2'
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+    elif encoder_type == 'spatial_film':
+        actor_net = SpatialSoftmaxActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
         )
     elif encoder_type == 'spatial_k':
-        actor_net = SpatialKActorNetwork(observation_spec, action_spec)
+        actor_net = SpatialKActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
         critic_net_1 = SpatialValueMapCriticNetwork(
-            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_1'
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
         )
         critic_net_2 = SpatialValueMapCriticNetwork(
-            observation_spec, action_spec, name='SpatialValueMapCriticNetwork_2'
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+    elif encoder_type == 'spatial_k_film':
+        actor_net = SpatialKActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
         )
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))

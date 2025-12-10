@@ -64,7 +64,7 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
 
     model_group = parser.add_argument_group("Model")
     model_group.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
-                             choices=["cnn", "spatial_softmax", "spatial_k"],
+                             choices=["cnn", "spatial_softmax", "spatial_k", "spatial_film", "spatial_k_film"],
                              help="Backbone encoder architecture for actor/critic")
 
     train_group = parser.add_argument_group("Training loop")

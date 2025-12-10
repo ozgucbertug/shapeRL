@@ -21,6 +21,29 @@ def make_tanh_squash_bijector() -> tfp.bijectors.Bijector:
     )
 
 
+class FiLMConditioner(layers.Layer):
+    """Produces per-block FiLM scales/shifts from a conditioning vector."""
+
+    def __init__(self, num_blocks: int, hidden_dim: int = 64,
+                 gamma_scale: float = 0.25, beta_scale: float = 0.25, **kwargs):
+        super().__init__(**kwargs)
+        self.num_blocks = int(num_blocks)
+        self.gamma_scale = float(gamma_scale)
+        self.beta_scale = float(beta_scale)
+        self.fc1 = layers.Dense(hidden_dim, activation='relu')
+        self.fc2 = layers.Dense(2 * self.num_blocks)
+
+    def call(self, cond: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+        x = self.fc1(cond)
+        params = self.fc2(x)
+        params = tf.reshape(params, [-1, self.num_blocks, 2])
+        gamma_raw = params[..., 0]
+        beta_raw = params[..., 1]
+        gamma = 1.0 + self.gamma_scale * tf.tanh(gamma_raw)
+        beta = self.beta_scale * tf.tanh(beta_raw)
+        return gamma, beta
+
+
 def bilinear_sample_nhwc(feat: tf.Tensor, xy01: tf.Tensor) -> tf.Tensor:
     """Samples per-location features from an NHWC map using normalized coords.
 
@@ -75,8 +98,25 @@ def bilinear_sample_nhwc(feat: tf.Tensor, xy01: tf.Tensor) -> tf.Tensor:
     return wa * Ia + wb * Ib + wc * Ic + wd * Id
 
 
+def sample_feature_maps(feature_maps: tuple[tf.Tensor, ...] | list[tf.Tensor], xy: tf.Tensor) -> tf.Tensor:
+    """Bilinear-sample the provided feature maps at xy and concatenate."""
+    locals_list = [bilinear_sample_nhwc(fmap, xy) for fmap in feature_maps]
+    if len(locals_list) == 1:
+        return locals_list[0]
+    return tf.concat(locals_list, axis=-1)
+
+
+def sample_obs_scalars(obs: tf.Tensor, xy: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    """Sample diff/grad/lap at xy and return with global scale token."""
+    diff_xy = bilinear_sample_nhwc(obs[..., 0:1], xy)
+    grad_xy = bilinear_sample_nhwc(obs[..., 3:4], xy)
+    lap_xy = bilinear_sample_nhwc(obs[..., 4:5], xy)
+    scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
+    return diff_xy, grad_xy, lap_xy, scale_token
+
+
 # ==========================================================================
-# Encoders
+# Blocks
 # ==========================================================================
 
 
@@ -190,6 +230,33 @@ class _ConvBlock(layers.Layer):
         return self.act(x)
 
 
+class FiLMConvBlock(layers.Layer):
+    """Conv-GN block with FiLM modulation and ReLU."""
+
+    def __init__(self, filters: int, stride: int = 1, **kwargs):
+        super().__init__(**kwargs)
+        self.conv = layers.Conv2D(filters, 3, strides=stride, padding='same')
+        groups = 16 if filters >= 64 else (8 if filters >= 32 else 4)
+        self.norm = layers.GroupNormalization(groups=groups, axis=-1, epsilon=1e-5)
+        self.act = layers.Activation('relu')
+
+    def call(self, inputs: tf.Tensor, gamma: tf.Tensor | None = None,
+             beta: tf.Tensor | None = None, training: bool | None = None) -> tf.Tensor:
+        x = self.conv(inputs)
+        x = self.norm(x, training=training)
+        if gamma is not None:
+            # Broadcast (B,) or (B,1) to spatial maps.
+            gamma = tf.reshape(gamma, [-1, 1, 1, 1])
+            x = gamma * x
+        if beta is not None:
+            beta = tf.reshape(beta, [-1, 1, 1, 1])
+            x = x + beta
+        return self.act(x)
+
+# ==========================================================================
+# Encoders
+# ==========================================================================
+
 class SpatialSoftmaxEncoder(layers.Layer):
     """CNN backbone that predicts a spatial expectation alongside a latent vector."""
 
@@ -244,6 +311,77 @@ class SpatialSoftmaxEncoder(layers.Layer):
         return latent, xy
 
 
+class SpatialFiLMEncoder(layers.Layer):
+    """CNN backbone with FiLM modulation using global scale/diff statistics."""
+
+    def current_temperature(self) -> tf.Tensor | None:
+        if self._use_heatmap and self.spatial_softmax is not None:
+            return self.spatial_softmax.current_temperature()
+        return None
+
+    def __init__(
+        self,
+        filters: tuple[int, ...] = (32, 64, 128),
+        latent_dim: int = 128,
+        return_feature_maps: bool = False,
+        use_heatmap: bool = True,
+        include_diff_stat: bool = True,
+        film_hidden: int = 64,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.blocks = []
+        for idx, f in enumerate(filters):
+            stride = 1 if idx == 0 else 2
+            self.blocks.append(FiLMConvBlock(f, stride=stride))
+        self._use_heatmap = use_heatmap
+        if self._use_heatmap:
+            self.heatmap_head = layers.Conv2D(1, 1, padding='same')
+            self.spatial_softmax = SpatialSoftmax()
+        else:
+            self.heatmap_head = None
+            self.spatial_softmax = None
+        self.global_pool = layers.GlobalAveragePooling2D()
+        self.latent = layers.Dense(latent_dim, activation='elu')
+        self._return_feature_maps = return_feature_maps
+        self._include_diff_stat = bool(include_diff_stat)
+        self.conditioner = FiLMConditioner(num_blocks=len(filters), hidden_dim=film_hidden)
+
+    def _conditioning_vector(self, inputs: tf.Tensor) -> tf.Tensor:
+        # Scale token is constant plane; reduce to scalar per batch.
+        scale_token = tf.reduce_mean(inputs[..., 5:], axis=[1, 2])  # [B,1]
+        parts = [scale_token]
+        if self._include_diff_stat:
+            diff_abs = tf.reduce_mean(tf.abs(inputs[..., 0:1]), axis=[1, 2])
+            parts.append(diff_abs)
+        return tf.concat(parts, axis=-1)
+
+    def call(
+        self, inputs: tf.Tensor, training: bool | None = None
+    ) -> tuple[tf.Tensor, tf.Tensor] | tuple[tf.Tensor, tf.Tensor, tuple[tf.Tensor, ...]]:
+        x = tf.cast(inputs, tf.float32)
+        cond_vec = self._conditioning_vector(x)
+        gamma, beta = self.conditioner(cond_vec)
+
+        feature_maps: list[tf.Tensor] = []
+        for idx, block in enumerate(self.blocks):
+            x = block(x, gamma=gamma[:, idx], beta=beta[:, idx], training=training)
+            feature_maps.append(x)
+
+        xy: tf.Tensor | None = None
+        if self._use_heatmap:
+            heatmap = self.heatmap_head(x)
+            xy = self.spatial_softmax(heatmap)
+        latent = self.latent(self.global_pool(x))
+        if self._return_feature_maps:
+            if len(feature_maps) >= 2:
+                maps = (feature_maps[-2], feature_maps[-1])
+            else:
+                maps = (feature_maps[-1],)
+            return latent, xy, maps
+        return latent, xy
+
+
 # ==========================================================================
 # Critics
 # ==========================================================================
@@ -252,9 +390,19 @@ class SpatialSoftmaxEncoder(layers.Layer):
 class SpatialSoftmaxCriticNetwork(network.Network):
     """Critic that evaluates supplied action xy coordinates via bilinear sampling."""
 
-    def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxCriticNetwork'):
+    def __init__(
+        self,
+        observation_spec,
+        action_spec,
+        name: str = 'SpatialSoftmaxCriticNetwork',
+        encoder_cls=SpatialSoftmaxEncoder,
+        use_heatmap: bool = False,
+    ):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True, use_heatmap=False)
+        self.encoder = encoder_cls(
+            return_feature_maps=True,
+            use_heatmap=use_heatmap,
+        )
         self.action_fc = layers.Dense(64, activation='relu')
         self.fc1 = layers.Dense(128, activation='relu')
         self.fc2 = layers.Dense(64, activation='relu')
@@ -265,17 +413,13 @@ class SpatialSoftmaxCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        latent, _, feature_maps = self.encoder(obs[..., :5], training=training)
+        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
+        latent, _, feature_maps = self.encoder(encoder_input, training=training)
         xy = acts[..., :2]
         action_latent = self.action_fc(acts)
 
-        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
-        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
-
-        diff = bilinear_sample_nhwc(obs[..., 0:1], xy)
-        grad = bilinear_sample_nhwc(obs[..., 3:4], xy)
-        lap = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
+        local_feat = sample_feature_maps(feature_maps, xy)
+        diff, grad, lap, scale_token = sample_obs_scalars(obs, xy)
         sampled_scalars = tf.concat([diff, grad, lap, scale_token], axis=-1)
 
         fused = tf.concat([latent, action_latent, local_feat, sampled_scalars], axis=-1)
@@ -288,12 +432,18 @@ class SpatialSoftmaxCriticNetwork(network.Network):
 class SpatialValueMapCriticNetwork(network.Network):
     """Critic that predicts a spatial value map and samples it at the commanded (x, y)."""
 
-    def __init__(self, observation_spec, action_spec, name: str = 'SpatialValueMapCriticNetwork'):
+    def __init__(
+        self,
+        observation_spec,
+        action_spec,
+        name: str = 'SpatialValueMapCriticNetwork',
+        encoder_cls=SpatialSoftmaxEncoder,
+        use_heatmap: bool = False,
+    ):
         super().__init__(input_tensor_spec=(observation_spec, action_spec), state_spec=(), name=name)
-        self.encoder = SpatialSoftmaxEncoder(
-            latent_dim=128,
+        self.encoder = encoder_cls(
             return_feature_maps=True,
-            use_heatmap=False,
+            use_heatmap=use_heatmap,
         )
         self.action_fc = layers.Dense(64, activation='relu')
         self.latent_fc = layers.Dense(64, activation='relu')
@@ -307,7 +457,8 @@ class SpatialValueMapCriticNetwork(network.Network):
         obs = tf.cast(observations, tf.float32)
         acts = tf.cast(actions, tf.float32)
 
-        latent, _, feature_maps = self.encoder(obs[..., :5], training=training)
+        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
+        latent, _, feature_maps = self.encoder(encoder_input, training=training)
         feat_map = feature_maps[-1]
         xy = acts[..., :2]
         dz = acts[..., 2:3]
@@ -345,10 +496,20 @@ class SpatialSoftmaxActorNetwork(network.Network):
     def current_temperature(self) -> tf.Tensor | None:
         return self.encoder.current_temperature()
 
-    def __init__(self, observation_spec, action_spec, name: str = 'SpatialSoftmaxActorNetwork'):
+    def __init__(
+        self,
+        observation_spec,
+        action_spec,
+        name: str = 'SpatialSoftmaxActorNetwork',
+        encoder_cls=SpatialSoftmaxEncoder,
+        use_heatmap: bool = True,
+    ):
         super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
         self._action_spec = action_spec
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True)
+        self.encoder = encoder_cls(
+            return_feature_maps=True,
+            use_heatmap=use_heatmap,
+        )
         self.fc1 = layers.Dense(128, activation='elu')
         self.fc2 = layers.Dense(64, activation='elu')
         self.depth_fc = layers.Dense(64, activation='elu')
@@ -359,13 +520,10 @@ class SpatialSoftmaxActorNetwork(network.Network):
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
-        latent, xy, feature_maps = self.encoder(obs[..., :5], training=training)
-        local_feats = [bilinear_sample_nhwc(feature_map, xy) for feature_map in feature_maps]
-        local_feat = local_feats[0] if len(local_feats) == 1 else tf.concat(local_feats, axis=-1)
-        diff_xy = bilinear_sample_nhwc(obs[..., 0:1], xy)
-        grad_xy = bilinear_sample_nhwc(obs[..., 3:4], xy)
-        lap_xy = bilinear_sample_nhwc(obs[..., 4:5], xy)
-        scale_token = tf.reduce_mean(obs[..., 5:], axis=[1, 2])  # [B,1]
+        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
+        latent, xy, feature_maps = self.encoder(encoder_input, training=training)
+        local_feat = sample_feature_maps(feature_maps, xy)
+        diff_xy, grad_xy, lap_xy, scale_token = sample_obs_scalars(obs, xy)
         local_feat = tf.concat([local_feat, diff_xy, grad_xy, lap_xy, scale_token], axis=-1)
         fused_in = tf.concat([latent, xy, scale_token], axis=-1)
         fused = self.fc1(fused_in)
@@ -392,7 +550,14 @@ class SpatialSoftmaxActorNetwork(network.Network):
 class SpatialKActorNetwork(network.Network):
     """Multi-modal spatial actor with straight-through Gumbel gating over K heatmaps."""
 
-    def __init__(self, observation_spec, action_spec, K: int = 4, name: str = 'SpatialKActor'):
+    def __init__(
+        self,
+        observation_spec,
+        action_spec,
+        K: int = 4,
+        name: str = 'SpatialKActor',
+        encoder_cls=SpatialSoftmaxEncoder,
+    ):
         super().__init__(input_tensor_spec=observation_spec, state_spec=(), name=name)
         if K <= 0:
             raise ValueError('Number of modes K must be positive.')
@@ -400,7 +565,7 @@ class SpatialKActorNetwork(network.Network):
             raise ValueError('SpatialKActorNetwork expects action spec with shape [3].')
         self._K = int(K)
 
-        self.encoder = SpatialSoftmaxEncoder(latent_dim=128, return_feature_maps=True, use_heatmap=False)
+        self.encoder = encoder_cls(return_feature_maps=True, use_heatmap=False)
         self.heatmap_head = layers.Conv2D(self._K, 1, padding='same', name='mixture_heatmap_head')
         self.spatial_softmax = SpatialSoftmax()
 
@@ -453,7 +618,8 @@ class SpatialKActorNetwork(network.Network):
 
     def call(self, observations, step_type=None, network_state=(), training: bool = False):
         obs = tf.cast(observations, tf.float32)
-        latent, _, feature_maps = self.encoder(obs[..., :5], training=training)
+        encoder_input = obs if isinstance(self.encoder, SpatialFiLMEncoder) else obs[..., :5]
+        latent, _, feature_maps = self.encoder(encoder_input, training=training)
         final_map = feature_maps[-1]
 
         heatmap_logits = self.heatmap_head(final_map)
@@ -530,6 +696,7 @@ class SpatialKActorNetwork(network.Network):
 __all__ = [
     'SpatialSoftmax',
     'SpatialSoftmaxEncoder',
+    'SpatialFiLMEncoder',
     'SpatialSoftmaxCriticNetwork',
     'SpatialValueMapCriticNetwork',
     'SpatialSoftmaxActorNetwork',
