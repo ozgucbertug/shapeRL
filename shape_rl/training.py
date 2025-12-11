@@ -291,20 +291,22 @@ def train(
         if steps_mean is not None:
             steps_mean = float(steps_mean)
 
-        tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=step_val)
+        # Group tags so RMSE/MAE/W2 for each statistic share a single TensorBoard chart.
+        tf.summary.scalar('eval/delta/rmse', rmse_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta/mae', mae_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta/w2', w2_summary['delta'], step=step_val)
 
-        tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/auc_norm/rmse', rmse_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/auc_norm/mae', mae_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/auc_norm/w2', w2_summary['auc_norm'], step=step_val)
 
-        tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/slope/rmse', rmse_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope/mae', mae_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope/w2', w2_summary['slope'], step=step_val)
+
+        tf.summary.scalar('eval/pos_frac/rmse', rmse_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/pos_frac/mae', mae_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
         if steps_mean is not None:
             tf.summary.scalar('eval/_steps_mean', steps_mean, step=step_val)
 
