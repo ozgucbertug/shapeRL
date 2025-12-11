@@ -24,6 +24,7 @@ from tf_agents.policies import random_tf_policy
 from tf_agents.agents.sac import sac_agent
 from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
+from tf_agents.policies import greedy_policy
 from tf_agents.utils import common as common_utils
 
 
@@ -268,6 +269,7 @@ def train(
         train_step_counter=global_step
     )
     tf_agent.initialize()
+    eval_policy = greedy_policy.GreedyPolicy(tf_agent.policy)
 
     def log_spatialsoftmax_temperature(step_val: int):
         try:
@@ -407,7 +409,12 @@ def train(
         amp_max=eval_py_env._amplitude_range[1],
     )
     # Evaluate heuristic with the unified compute_eval for consistency
-    heur_metrics = compute_eval(eval_env_factory, heuristic_policy, num_eval_episodes, base_seed=eval_base_seed)
+    heur_metrics = compute_eval(
+        eval_env_factory,
+        heuristic_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
     print_eval_metrics(heur_metrics, header="Heuristic Eval")
     if log_eval_curves:
         log_eval_metric_curves(heur_metrics, logdir, run_name="eval_heuristic")
@@ -661,7 +668,12 @@ def train(
                     tqdm.write(f"[Checkpoint] Failed to save periodic checkpoint: {checkpoint_err}")
             if eval_interval > 0 and update % eval_interval == 0:
                 # Detailed evaluation metrics
-                metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
+                metrics = compute_eval(
+                    eval_env_factory,
+                    eval_policy,
+                    num_eval_episodes,
+                    base_seed=eval_base_seed,
+                )
                 rmse_summary, mae_summary, w2_summary = log_eval_summaries(metrics, update)
 
                 # Log per-update eval curves as native TensorBoard scalars in a separate run dir

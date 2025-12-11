@@ -32,7 +32,7 @@ class TrainingConfig:
     use_heuristic_warmup: bool = True
 
     # Evaluation
-    num_eval_episodes: int = 1
+    num_eval_episodes: int = 10
     eval_interval: int = 5_000
     log_eval_curves: bool = True
 

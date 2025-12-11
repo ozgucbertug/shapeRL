@@ -152,6 +152,18 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                  base_seed: int | None = None,
                  w2_stride: int = 4, w2_reg: float = 0.05,
                  w2_max_points: int = WASSERSTEIN_MAX_POINTS) -> Dict[str, Any]:
+    if num_episodes is None or num_episodes <= 0:
+        return {
+            'rmse_series_mean': [],
+            'mae_series_mean': [],
+            'w2_series_mean': [],
+            'rmse_series_list': [],
+            'mae_series_list': [],
+            'w2_series_list': [],
+            'steps_per_episode': [],
+            'steps_mean': -1.0,
+            'curve_episode': None,
+        }
 
     rmse_series_list: list[list[float]] = []
     mae_series_list: list[list[float]] = []
@@ -236,6 +248,9 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         'rmse_series_mean': rmse_mean,
         'mae_series_mean': mae_mean,
         'w2_series_mean': w2_mean,
+        'rmse_series_list': rmse_series_list,
+        'mae_series_list': mae_series_list,
+        'w2_series_list': w2_series_list,
         'steps_per_episode': steps_list,
         'steps_mean': steps_mean,
     }
@@ -304,10 +319,21 @@ def summarize_metric_series(series: Sequence[float], pos_tol: float = 1e-9) -> D
 def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix: str = 'eval_runs'):
     """
     Log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run directory.
+    Prefer the first episode's curves when per-episode series are available.
     """
-    rmse = list(metrics.get('rmse_series_mean') or [])
-    mae  = list(metrics.get('mae_series_mean')  or [])
-    w2   = list(metrics.get('w2_series_mean')   or [])
+    rmse_list = metrics.get('rmse_series_list')
+    mae_list = metrics.get('mae_series_list')
+    w2_list = metrics.get('w2_series_list')
+
+    if rmse_list and mae_list and w2_list:
+        rmse = list(rmse_list[0])
+        mae = list(mae_list[0])
+        w2 = list(w2_list[0])
+    else:
+        rmse = list(metrics.get('rmse_series_mean') or [])
+        mae  = list(metrics.get('mae_series_mean')  or [])
+        w2   = list(metrics.get('w2_series_mean')   or [])
+
     min_len = min(len(rmse), len(mae), len(w2))
     if min_len == 0:
         return
