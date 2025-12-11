@@ -54,10 +54,10 @@ def _make_env(seed: int | None, debug: bool = False) -> callable:
 
 
 def train(
-    num_parallel_envs: int = 4,
+    num_parallel_envs: int = 64,
     eval_interval: int = 5000,
     seed: int | None = None,
-    batch_size: int = 16,
+    batch_size: int = 256,
     collect_steps_per_update: int = 4,
     num_updates: int = 200000,
     num_eval_episodes: int = 5,
@@ -69,8 +69,8 @@ def train(
     env_debug: bool = True,
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
-    checkpoint_interval: int | None = 50_000,
-    learning_rate: float = 3e-4
+    checkpoint_interval: int | None = None,
+    learning_rate: float = 1e-4
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:

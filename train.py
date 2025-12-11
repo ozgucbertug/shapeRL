@@ -14,7 +14,7 @@ from shape_rl.training import train as _train
 class TrainingConfig:
     # Environment
     seed: int | None = None
-    num_parallel_envs: int = 128
+    num_parallel_envs: int = 64
     env_debug: bool = True
 
     # Model
@@ -22,9 +22,9 @@ class TrainingConfig:
 
     # Training loop
     num_updates: int = 250_000
-    batch_size: int = 512
-    collect_steps_per_update: int = 8
-    learning_rate: float = 1e-5
+    batch_size: int = 256
+    collect_steps_per_update: int = 4
+    learning_rate: float = 1e-4
 
     # Warm-up/Replay bootstrap
     initial_collect_steps: int | None = 2**17
