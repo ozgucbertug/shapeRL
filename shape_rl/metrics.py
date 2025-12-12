@@ -154,21 +154,18 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                  w2_max_points: int = WASSERSTEIN_MAX_POINTS) -> Dict[str, Any]:
     if num_episodes is None or num_episodes <= 0:
         return {
-            'rmse_series_mean': [],
-            'mae_series_mean': [],
-            'w2_series_mean': [],
             'rmse_series_list': [],
             'mae_series_list': [],
             'w2_series_list': [],
-            'steps_per_episode': [],
-            'steps_mean': -1.0,
-            'curve_episode': None,
+            'reward_series_list': [],
+            'steps_series_list': [],
         }
 
     rmse_series_list: list[list[float]] = []
     mae_series_list: list[list[float]] = []
     w2_series_list: list[list[float]] = []
     steps_list: list[int] = []
+    reward_series_list: list[list[float]] = []
 
     for ep in range(num_episodes):
         env = env_factory(ep if base_seed is None else base_seed + ep)
@@ -191,6 +188,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
             rmse_series = [rmse0]
             mae_series = [mae0]
             w2_series = [w20]
+            reward_series = [0.0]
             steps = 0
 
             while not time_step.is_last():
@@ -214,6 +212,10 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
                         max_points=w2_max_points,
                     )
                 )
+                try:
+                    reward_series.append(float(np.mean(time_step.reward)))
+                except Exception:
+                    reward_series.append(np.nan)
         finally:
             with suppress(Exception):
                 (tf_env.close() if tf_env is not None else None)
@@ -224,95 +226,107 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
         mae_series_list.append(mae_series)
         w2_series_list.append(w2_series)
         steps_list.append(int(steps))
-
-    def _stack_pad_nan(series_list):
-        if not series_list:
-            return None
-        m = max(len(s) for s in series_list)
-        if m <= 0:
-            return None
-        arr = np.full((len(series_list), m), np.nan, dtype=np.float64)
-        for i, s in enumerate(series_list):
-            si = np.asarray(s, dtype=np.float64)
-            arr[i, :si.size] = si
-        return arr
-    rmse_arr = _stack_pad_nan(rmse_series_list)
-    mae_arr = _stack_pad_nan(mae_series_list)
-    w2_arr = _stack_pad_nan(w2_series_list)
-    rmse_mean = np.nanmean(rmse_arr, axis=0).tolist() if rmse_arr is not None else []
-    mae_mean = np.nanmean(mae_arr, axis=0).tolist() if mae_arr is not None else []
-    w2_mean = np.nanmean(w2_arr, axis=0).tolist() if w2_arr is not None else []
-    steps_mean = float(np.mean(steps_list)) if steps_list else -1.0
+        reward_series_list.append(reward_series)
 
     return {
-        'rmse_series_mean': rmse_mean,
-        'mae_series_mean': mae_mean,
-        'w2_series_mean': w2_mean,
         'rmse_series_list': rmse_series_list,
         'mae_series_list': mae_series_list,
         'w2_series_list': w2_series_list,
-        'steps_per_episode': steps_list,
-        'steps_mean': steps_mean,
+        'steps_series_list': steps_list,
+        'reward_series_list': reward_series_list,
     }
 
 
-def summarize_metric_series(series: Sequence[float], pos_tol: float = 1e-9) -> Dict[str, float]:
+def summarize_metric_series(series_or_list: Sequence[float] | Sequence[Sequence[float]] | None,
+                            pos_tol: float = 1e-9) -> Dict[str, float]:
     """
-    Derive scalar summary statistics from a per-step metric series.
-    Returns deltas (normalized by initial magnitude), slopes (normalized),
-    normalized AUC (per-step, normalized by initial), relative improvement,
-    and the fraction of steps with positive (decreasing) improvements.
+    Summarize a single per-step metric series or a list of series.
+    Uses step-weighted aggregation across episodes so longer episodes contribute proportionally.
     """
-    fallback = {
-        'initial': -1.0,
-        'final': -1.0,
-        'delta': -1.0,
-        'slope': -1.0,
-        'auc_norm': -1.0,
-        'pos_improve_frac': -1.0,
-        'relative_improvement': -1.0,
-    }
+    fields = ('initial', 'final', 'delta', 'slope', 'auc_norm', 'pos_improve_frac', 'relative_improvement')
+    fallback = {key: -1.0 for key in fields}
 
-    arr = np.asarray(series, dtype=np.float64)
-    if arr.size == 0:
-        return fallback
-    finite_mask = np.isfinite(arr)
-    if not finite_mask.any():
+    def _summarize_one(series: Sequence[float]) -> tuple[Dict[str, float], int, int]:
+        arr = np.asarray(series, dtype=np.float64)
+        if arr.size == 0:
+            return fallback, 0, 0
+        finite_mask = np.isfinite(arr)
+        if not finite_mask.any():
+            return fallback, 0, 0
+
+        start_idx = int(np.argmax(finite_mask))
+        trimmed = arr[start_idx:]
+        contiguous_values: list[float] = []
+        for value in trimmed:
+            if np.isfinite(value):
+                contiguous_values.append(float(value))
+            else:
+                break
+        values = np.asarray(contiguous_values, dtype=np.float64)
+        if values.size == 0:
+            return fallback, 0, 0
+
+        scale = max(abs(float(values[0])), 1e-6)
+        steps = start_idx + np.arange(values.size, dtype=np.float64)
+        initial = float(values[0])
+        final = float(values[-1])
+        raw_delta = initial - final
+        delta = raw_delta / scale
+        slope_raw = float(np.polyfit(steps, values, 1)[0]) if values.size >= 2 else 0.0
+        slope = slope_raw / scale
+        auc_norm = normalized_auc(values.tolist())
+        diffs = np.diff(values)
+        improve_count = int(np.sum(diffs < -pos_tol)) if diffs.size > 0 else 0
+        total_count = int(diffs.size)
+        pos_improve_frac = float(improve_count / max(total_count, 1))
+        rel_improvement = raw_delta / scale
+        summary = {
+            'initial': initial,
+            'final': final,
+            'delta': delta,
+            'slope': slope,
+            'auc_norm': auc_norm,
+            'pos_improve_frac': pos_improve_frac,
+            'relative_improvement': rel_improvement,
+        }
+        return summary, improve_count, total_count
+
+    if series_or_list is None:
         return fallback
 
-    start_idx = int(np.argmax(finite_mask))
-    trimmed = arr[start_idx:]
-    contiguous_values: list[float] = []
-    for value in trimmed:
-        if np.isfinite(value):
-            contiguous_values.append(float(value))
-        else:
-            break
-    values = np.asarray(contiguous_values, dtype=np.float64)
-    if values.size == 0:
-        return fallback
+    is_series_list = (
+        isinstance(series_or_list, Sequence)
+        and len(series_or_list) > 0
+        and isinstance(series_or_list[0], Sequence)
+        and not np.isscalar(series_or_list[0])
+    )
 
-    scale = max(abs(float(values[0])), 1e-6)
-    steps = start_idx + np.arange(values.size, dtype=np.float64)
-    initial = float(values[0])
-    final = float(values[-1])
-    raw_delta = initial - final
-    delta = raw_delta / scale
-    slope_raw = float(np.polyfit(steps, values, 1)[0]) if values.size >= 2 else 0.0
-    slope = slope_raw / scale
-    auc_norm = normalized_auc(values.tolist())
-    diffs = np.diff(values)
-    pos_improve_frac = float(np.mean(diffs < -pos_tol)) if diffs.size > 0 else 0.0
-    rel_improvement = raw_delta / scale
-    return {
-        'initial': initial,
-        'final': final,
-        'delta': delta,
-        'slope': slope,
-        'auc_norm': auc_norm,
-        'pos_improve_frac': pos_improve_frac,
-        'relative_improvement': rel_improvement,
-    }
+    if not is_series_list:
+        summary, _, _ = _summarize_one(series_or_list)  # type: ignore[arg-type]
+        return summary
+
+    acc_weighted: dict[str, float] = {key: 0.0 for key in fields}
+    improve_total = 0
+    count_total = 0
+    total_weight = 0.0
+
+    for series in series_or_list:  # type: ignore[assignment]
+        summary, improve_count, total_count = _summarize_one(series)
+        weight = float(max(total_count, 1))
+        total_weight += weight
+        improve_total += improve_count
+        count_total += total_count
+        for key in fields:
+            val = summary.get(key, -1.0)
+            if np.isfinite(val):
+                acc_weighted[key] += val * weight
+
+    aggregated = {}
+    for key in fields:
+        aggregated[key] = (acc_weighted[key] / total_weight) if total_weight > 0 else -1.0
+
+    aggregated['pos_improve_frac'] = (float(improve_total) / float(max(count_total, 1))) if count_total > 0 else -1.0
+    return aggregated
 
 
 # --- Helper: log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run ---
@@ -324,17 +338,17 @@ def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix
     rmse_list = metrics.get('rmse_series_list')
     mae_list = metrics.get('mae_series_list')
     w2_list = metrics.get('w2_series_list')
+    reward_series = metrics.get('reward_series_list')
 
-    if rmse_list and mae_list and w2_list:
-        rmse = list(rmse_list[0])
-        mae = list(mae_list[0])
-        w2 = list(w2_list[0])
-    else:
-        rmse = list(metrics.get('rmse_series_mean') or [])
-        mae  = list(metrics.get('mae_series_mean')  or [])
-        w2   = list(metrics.get('w2_series_mean')   or [])
+    if not (rmse_list and mae_list and w2_list):
+        return
 
-    min_len = min(len(rmse), len(mae), len(w2))
+    rmse = list(np.asarray(rmse_list[0], dtype=np.float64))
+    mae = list(np.asarray(mae_list[0], dtype=np.float64))
+    w2 = list(np.asarray(w2_list[0], dtype=np.float64))
+    reward = list(np.asarray(reward_series[0], dtype=np.float64))
+
+    min_len = min(len(rmse), len(mae), len(w2), len(reward))
     if min_len == 0:
         return
 
@@ -350,12 +364,13 @@ def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix
             tf.summary.scalar('curves/rmse', float(rmse[i]), step=i)
             tf.summary.scalar('curves/mae',  float(mae[i]),  step=i)
             tf.summary.scalar('curves/w2',   float(w2[i]),   step=i)
+            tf.summary.scalar('curves/reward_return', float(reward[i]), step=i)
     writer.flush()
     writer.close()
 
 
 # --- Pretty-print evaluation metrics in a multi-line compact format
-def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = None, show_pos_fracs: bool = True, width: int = 80) -> None:
+def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = None, width: int = 80) -> None:
     """
     Pretty-print evaluation metrics in a consistent, compact multi-line format.
     Uses tqdm.write to avoid clobbering progress bars.
@@ -364,40 +379,79 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
         metrics: dict returned by compute_eval.
         header: label for the section (e.g., 'Eval', 'Heuristic Eval').
         step: optional outer training step for display.
-        show_pos_fracs: whether to include PosImprove% summary line.
         width: width of the dashed separators.
     """
     sep = "-" * max(20, width)
     head = f"[{header} @ {step}]" if step is not None else f"[{header}]"
-    rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
-    mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
-    w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-    steps_mean_val = metrics.get('steps_mean')
-    if steps_mean_val is not None:
-        steps_mean_val = int(round(float(steps_mean_val)))
+    rmse_summary = summarize_metric_series(metrics.get('rmse_series_list'))
+    mae_summary = summarize_metric_series(metrics.get('mae_series_list'))
+    w2_summary = summarize_metric_series(metrics.get('w2_series_list'))
+    steps_series = metrics.get('steps_series_list')
+    steps_mean_val = None
+    try:
+        if steps_series is not None:
+            steps_mean_val = int(round(float(np.mean(steps_series))))
+    except Exception:
+        steps_mean_val = None
+
+    reward_series = metrics.get('reward_series_list') or []
+    episode_returns: list[float] = []
+    for curve in reward_series:
+        if not curve:
+            continue
+        with suppress(Exception):
+            episode_returns.append(float(np.nanmean(curve)))
+
+    return_rmse_corr = np.nan
+    try:
+        if episode_returns and len(episode_returns) > 1:
+            rmse_improve_list = []
+            for series in metrics.get('rmse_series_list') or []:
+                rmse_improve_list.append(summarize_metric_series(series).get('relative_improvement', np.nan))
+            ep_returns_arr = np.asarray(episode_returns, dtype=np.float64)
+            rmse_improve_arr = np.asarray(rmse_improve_list, dtype=np.float64)
+            mask = np.isfinite(ep_returns_arr) & np.isfinite(rmse_improve_arr)
+            if np.count_nonzero(mask) > 1:
+                return_rmse_corr = float(np.corrcoef(ep_returns_arr[mask], rmse_improve_arr[mask])[0, 1])
+    except Exception:
+        return_rmse_corr = np.nan
+
+    def _format_rel_improve(summary: dict) -> str:
+        rel = summary.get('relative_improvement', -1.0)
+        if not np.isfinite(rel) or rel < -0.999:
+            return "n/a"
+        final_norm = 1.0 - rel
+        return f"1.00 → {final_norm:.2f} ({rel:.2%})"
 
     tqdm.write(sep)
     tqdm.write(head)
     if steps_mean_val is not None:
         tqdm.write(f"Episode Steps: {steps_mean_val:d}")
     tqdm.write(
-        f"MAE  Δ={mae_summary['delta']:.4f} %={mae_summary['relative_improvement']:.2%} "
-        f"(init {mae_summary['initial']:.4f} → final {mae_summary['final']:.4f})"
-    )
-    tqdm.write(
-        f"RMSE Δ={rmse_summary['delta']:.4f} %={rmse_summary['relative_improvement']:.2%} "
-        f"(init {rmse_summary['initial']:.4f} → final {rmse_summary['final']:.4f})"
-    )
-    tqdm.write(
-        f"W2   Δ={w2_summary['delta']:.4f} %={w2_summary['relative_improvement']:.2%} "
-        f"(init {w2_summary['initial']:.4f} → final {w2_summary['final']:.4f})"
-    )
-    if show_pos_fracs:
-        tqdm.write(
-            f"PosImprove% — RMSE {rmse_summary['pos_improve_frac']:.2%} | "
-            f"MAE {mae_summary['pos_improve_frac']:.2%} | "
-            f"W2 {w2_summary['pos_improve_frac']:.2%}"
+        "Δ% — RMSE {rmse} | MAE {mae} | W2 {w2}".format(
+            rmse=_format_rel_improve(rmse_summary),
+            mae=_format_rel_improve(mae_summary),
+            w2=_format_rel_improve(w2_summary),
         )
+    )
+    tqdm.write(
+        f"PosImprove% — RMSE {rmse_summary['pos_improve_frac']:.2%} | "
+        f"MAE {mae_summary['pos_improve_frac']:.2%} | "
+        f"W2 {w2_summary['pos_improve_frac']:.2%}"
+    )
+    if episode_returns:
+        ret_mean = float(np.mean(episode_returns))
+        corr_str = "n/a"
+        if np.isfinite(return_rmse_corr):
+            corr_str = f"{return_rmse_corr:.3f}"
+        tqdm.write(f"Return — mean {ret_mean:.3f} | corr(return, ΔRMSE) {corr_str}")
+    if reward_series:
+        first_curve = reward_series[0]
+        if first_curve:
+            try:
+                tqdm.write(f"First-episode return curve samples: start {first_curve[0]:.3f} end {first_curve[-1]:.3f}")
+            except Exception:
+                pass
     tqdm.write(sep)
 
 

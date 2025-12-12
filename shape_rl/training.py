@@ -284,31 +284,106 @@ def train(
                 pass
 
     def log_eval_summaries(metrics: dict, step_val: int):
-        rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
-        mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
-        w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-        steps_mean = metrics.get('steps_mean')
-        if steps_mean is not None:
-            steps_mean = float(steps_mean)
+        rmse_summary = summarize_metric_series(metrics.get('rmse_series_list'))
+        mae_summary = summarize_metric_series(metrics.get('mae_series_list'))
+        w2_summary = summarize_metric_series(metrics.get('w2_series_list'))
+        steps_series = metrics.get('steps_series_list')
+
+        reward_series = metrics.get('reward_series_list') or []
+        episode_returns: list[float] = []
+        for curve in reward_series:
+            episode_returns.append(float(np.nanmean(curve)))
+
+        def _per_episode_corr(metric_series_list):
+            rewards = []
+            improves = []
+            for r_curve, m_series in zip(reward_series, metric_series_list or []):
+                if not r_curve or not m_series:
+                    continue
+                try:
+                    r_mean = float(np.nanmean(r_curve))
+                    m_improve = summarize_metric_series(m_series).get('relative_improvement', np.nan)
+                except Exception:
+                    continue
+                if np.isfinite(r_mean) and np.isfinite(m_improve):
+                    rewards.append(r_mean)
+                    improves.append(m_improve)
+            if len(rewards) > 1:
+                r_arr = np.asarray(rewards, dtype=np.float64)
+                m_arr = np.asarray(improves, dtype=np.float64)
+                mask = np.isfinite(r_arr) & np.isfinite(m_arr)
+                if np.count_nonzero(mask) > 1:
+                    return float(np.corrcoef(r_arr[mask], m_arr[mask])[0, 1])
+            return np.nan
+
+        def _per_step_corr(metric_series_list):
+            rewards_flat = []
+            deltas_flat = []
+            for r_curve, m_series in zip(reward_series, metric_series_list or []):
+                if not r_curve or len(m_series) < 2:
+                    continue
+                try:
+                    rewards = np.asarray(r_curve[1:], dtype=np.float64)
+                    metric_vals = np.asarray(m_series, dtype=np.float64)
+                    deltas = np.diff(metric_vals)
+                    min_len = min(rewards.size, deltas.size)
+                    if min_len <= 1:
+                        continue
+                    rewards = rewards[:min_len]
+                    deltas = deltas[:min_len]
+                    mask = np.isfinite(rewards) & np.isfinite(deltas)
+                    if mask.any():
+                        rewards_flat.append(rewards[mask])
+                        deltas_flat.append(deltas[mask])
+                except Exception:
+                    continue
+            if rewards_flat and deltas_flat:
+                r_all = np.concatenate(rewards_flat)
+                d_all = np.concatenate(deltas_flat)
+                mask = np.isfinite(r_all) & np.isfinite(d_all)
+                if np.count_nonzero(mask) > 1:
+                    return float(np.corrcoef(r_all[mask], d_all[mask])[0, 1])
+            return np.nan
+
+        corr_ep_rmse = _per_episode_corr(metrics.get('rmse_series_list'))
+        corr_ep_mae = _per_episode_corr(metrics.get('mae_series_list'))
+        corr_ep_w2 = _per_episode_corr(metrics.get('w2_series_list'))
+
+        corr_step_rmse = _per_step_corr(metrics.get('rmse_series_list'))
+        corr_step_mae = _per_step_corr(metrics.get('mae_series_list'))
+        corr_step_w2 = _per_step_corr(metrics.get('w2_series_list'))
 
         # Group tags so RMSE/MAE/W2 for each statistic share a single TensorBoard chart.
-        tf.summary.scalar('eval/delta/rmse', rmse_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/delta/mae', mae_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/delta/w2', w2_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta_norm/rmse', rmse_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta_norm/mae', mae_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta_norm/w2', w2_summary['delta'], step=step_val)
 
         tf.summary.scalar('eval/auc_norm/rmse', rmse_summary['auc_norm'], step=step_val)
         tf.summary.scalar('eval/auc_norm/mae', mae_summary['auc_norm'], step=step_val)
         tf.summary.scalar('eval/auc_norm/w2', w2_summary['auc_norm'], step=step_val)
 
-        tf.summary.scalar('eval/slope/rmse', rmse_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/slope/mae', mae_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/slope/w2', w2_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope_norm/rmse', rmse_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope_norm/mae', mae_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope_norm/w2', w2_summary['slope'], step=step_val)
 
         tf.summary.scalar('eval/pos_frac/rmse', rmse_summary['pos_improve_frac'], step=step_val)
         tf.summary.scalar('eval/pos_frac/mae', mae_summary['pos_improve_frac'], step=step_val)
         tf.summary.scalar('eval/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
-        if steps_mean is not None:
-            tf.summary.scalar('eval/_steps_mean', steps_mean, step=step_val)
+        tf.summary.scalar('eval/_steps_mean', float(np.mean(steps_series)), step=step_val)
+        if episode_returns:
+            tf.summary.scalar('eval/return_mean', float(np.mean(episode_returns)), step=step_val)
+        if np.isfinite(corr_ep_rmse):
+            tf.summary.scalar('eval/per_ep_corr/rmse', corr_ep_rmse, step=step_val)
+        if np.isfinite(corr_ep_mae):
+            tf.summary.scalar('eval/per_ep_corr/mae', corr_ep_mae, step=step_val)
+        if np.isfinite(corr_ep_w2):
+            tf.summary.scalar('eval/per_ep_corr/w2', corr_ep_w2, step=step_val)
+        if np.isfinite(corr_step_rmse):
+            tf.summary.scalar('eval/per_step_corr/rmse', corr_step_rmse, step=step_val)
+        if np.isfinite(corr_step_mae):
+            tf.summary.scalar('eval/per_step_corr/mae', corr_step_mae, step=step_val)
+        if np.isfinite(corr_step_w2):
+            tf.summary.scalar('eval/per_step_corr/w2', corr_step_w2, step=step_val)
 
         return rmse_summary, mae_summary, w2_summary
 
