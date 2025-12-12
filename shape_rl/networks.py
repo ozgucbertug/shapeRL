@@ -21,6 +21,35 @@ def make_tanh_squash_bijector() -> tfp.bijectors.Bijector:
     )
 
 
+class SquashedMultivariateNormalDiag(tfp.distributions.TransformedDistribution):
+    """MultivariateNormalDiag with tanh+affine squashing and an analytic mode."""
+
+    def __init__(self, loc: tf.Tensor, scale_diag: tf.Tensor,
+                 bijector: tfp.bijectors.Bijector | None = None,
+                 name: str = 'SquashedMultivariateNormalDiag'):
+        base = tfp.distributions.MultivariateNormalDiag(loc=loc, scale_diag=scale_diag)
+        parameters = dict(locals())
+        super().__init__(distribution=base,
+                         bijector=bijector or make_tanh_squash_bijector(),
+                         name=name)
+        # Store subclass parameters so TFP shape utilities see the correct signature.
+        self._parameters = parameters
+
+    def mode(self) -> tf.Tensor:
+        # Chain bijector is monotonic, so transforming the base mode is valid.
+        return self.bijector.forward(self.distribution.mode())
+
+    @classmethod
+    def _parameter_properties(cls, dtype, num_classes=None):
+        return dict(
+            loc=tfp.util.ParameterProperties(event_ndims=1),
+            scale_diag=tfp.util.ParameterProperties(event_ndims=1,
+                                                    default_constraining_bijector_fn=tfp.bijectors.Softplus),
+            bijector=tfp.util.ParameterProperties(),
+            name=tfp.util.ParameterProperties(default_constraining_bijector_fn=None),
+        )
+
+
 class FiLMConditioner(layers.Layer):
     """Produces per-block FiLM scales/shifts from a conditioning vector."""
 
@@ -267,7 +296,7 @@ class SpatialSoftmaxEncoder(layers.Layer):
 
     def __init__(
         self,
-        filters: tuple[int, ...] = (48, 96, 192),
+        filters: tuple[int, ...] = (32, 64, 128),
         latent_dim: int = 128,
         return_feature_maps: bool = False,
         use_heatmap: bool = True,
@@ -326,7 +355,7 @@ class SpatialFiLMEncoder(layers.Layer):
 
     def __init__(
         self,
-        filters: tuple[int, ...] = (48, 96, 192),
+        filters: tuple[int, ...] = (32, 64, 128),
         latent_dim: int = 128,
         return_feature_maps: bool = False,
         use_heatmap: bool = True,
@@ -549,8 +578,9 @@ class SpatialSoftmaxActorNetwork(network.Network):
         logstd = tf.clip_by_value(logstd, -3.0, 1.0)
         scale = tf.nn.softplus(logstd) + 1e-3
 
-        base = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=scale)
-        dist = tfp.distributions.TransformedDistribution(base, make_tanh_squash_bijector())
+        dist = SquashedMultivariateNormalDiag(loc=mean,
+                                              scale_diag=scale,
+                                              bijector=make_tanh_squash_bijector())
         return dist, network_state
 
 
@@ -697,8 +727,9 @@ class SpatialKActorNetwork(network.Network):
         mean = tf.concat([xy_mean, dz_mean_selected], axis=-1)
         scale = tf.concat([xy_scale, dz_scale], axis=-1)
 
-        base_dist = tfp.distributions.MultivariateNormalDiag(loc=mean, scale_diag=scale)
-        dist = tfp.distributions.TransformedDistribution(distribution=base_dist, bijector=self._bijector)
+        dist = SquashedMultivariateNormalDiag(loc=mean,
+                                              scale_diag=scale,
+                                              bijector=self._bijector)
         return dist, network_state
 
 

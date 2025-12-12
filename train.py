@@ -18,7 +18,7 @@ class TrainingConfig:
     env_debug: bool = True
 
     # Model
-    encoder_type: str = 'spatial_softmax'
+    encoder_type: str = 'spatial_film'
 
     # Training loop
     num_updates: int = 250_000
@@ -32,7 +32,7 @@ class TrainingConfig:
     use_heuristic_warmup: bool = True
 
     # Evaluation
-    num_eval_episodes: int = 10
+    num_eval_episodes: int = 8
     eval_interval: int = 5_000
     log_eval_curves: bool = True
 

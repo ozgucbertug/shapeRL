@@ -361,9 +361,9 @@ def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix
         for i in range(min_len):
             if not (np.isfinite(rmse[i]) and np.isfinite(mae[i]) and np.isfinite(w2[i])):
                 continue
-            tf.summary.scalar('curves/rmse', float(rmse[i]), step=i)
-            tf.summary.scalar('curves/mae',  float(mae[i]),  step=i)
-            tf.summary.scalar('curves/w2',   float(w2[i]),   step=i)
+            tf.summary.scalar('curves/_rmse', float(rmse[i]), step=i)
+            tf.summary.scalar('curves/_mae',  float(mae[i]),  step=i)
+            tf.summary.scalar('curves/_w2',   float(w2[i]),   step=i)
             tf.summary.scalar('curves/reward_return', float(reward[i]), step=i)
     writer.flush()
     writer.close()

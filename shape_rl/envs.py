@@ -18,7 +18,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         amplitude_range=(10.0, 40.0),
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         tool_radius: int = 5,
-        max_steps: int = 1024,
+        max_steps: int = 2048,
         max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         error_threshold: float = 0.05,
