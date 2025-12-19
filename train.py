@@ -21,7 +21,7 @@ class TrainingConfig:
     encoder_type: str = 'spatial_film'
 
     # Training loop
-    num_updates: int = 250_000
+    num_updates: int = 500_000
     batch_size: int = 256
     collect_steps_per_update: int = 4
     learning_rate: float = 1e-4
@@ -40,6 +40,7 @@ class TrainingConfig:
     log_interval: int = 1_000
     checkpoint_interval: int | None = 5_000
     debug: bool = False
+    run_name: str | None = None
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -66,6 +67,8 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
     model_group.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
                              choices=["cnn", "spatial_softmax", "spatial_k", "spatial_film", "spatial_k_film"],
                              help="Backbone encoder architecture for actor/critic")
+    model_group.add_argument("--run_name", type=str, default=defaults.run_name,
+                             help="Optional name for the log/checkpoint folder (defaults to timestamp)")
 
     train_group = parser.add_argument_group("Training loop")
     train_group.add_argument("--num_updates", type=int, default=defaults.num_updates,
@@ -146,6 +149,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         log_eval_curves=cfg.log_eval_curves,
         checkpoint_interval=cfg.checkpoint_interval,
         learning_rate=cfg.learning_rate,
+        run_name=cfg.run_name,
     )
 
 

@@ -70,7 +70,8 @@ def train(
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
     checkpoint_interval: int | None = None,
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-4,
+    run_name: str | None = None,
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:
@@ -397,7 +398,8 @@ def train(
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
-    logdir = os.path.join(log_root, datetime.now().strftime('%Y%m%d-%H%M%S'))
+    ts_name = datetime.now().strftime('%Y%m%d-%H%M%S')
+    logdir = os.path.join(log_root, run_name if run_name else ts_name)
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
     tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
