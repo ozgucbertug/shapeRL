@@ -252,11 +252,14 @@ def train(
     alpha_lr = learning_rate * 0.2
     critic_lr = learning_rate * 0.5
 
-    # Robust TD loss to tame critic spikes
-    huber_loss = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
-
-    def _huber_td_loss(td_targets, td_predictions):
-        return huber_loss(td_targets, td_predictions)
+    # Robust TD loss to tame critic spikes (element-wise to satisfy per-sample loss requirement)
+    def _huber_td_loss(td_targets, td_predictions, delta: float = 1.0):
+        error = td_predictions - td_targets
+        delta_t = tf.cast(delta, error.dtype)
+        abs_error = tf.abs(error)
+        quadratic = tf.minimum(abs_error, delta_t)
+        linear = abs_error - quadratic
+        return 0.5 * tf.square(quadratic) + delta_t * linear - 0.5 * tf.square(delta_t)
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
