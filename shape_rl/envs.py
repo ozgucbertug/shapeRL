@@ -79,7 +79,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._k_deficit  = 1.5
         self._k_overcut  = 0.35
         self._alpha_over = 0.5
-        self._reward_scale = 6.0
+        self._reward_scale = 4.0
         self._vol_reg = 0.1
 
         # Additional reward shaping / safety weights

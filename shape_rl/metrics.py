@@ -188,7 +188,7 @@ def compute_eval(env_factory: Callable[[int | None], Any], policy, num_episodes:
             rmse_series = [rmse0]
             mae_series = [mae0]
             w2_series = [w20]
-            reward_series = [0.0]
+            reward_series: list[float] = []
             steps = 0
 
             while not time_step.is_last():

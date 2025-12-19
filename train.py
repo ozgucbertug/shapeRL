@@ -27,7 +27,7 @@ class TrainingConfig:
     learning_rate: float = 1e-4
 
     # Warm-up/Replay bootstrap
-    initial_collect_steps: int | None = 2**17
+    initial_collect_steps: int | None = 2**16
     replay_capacity_total: int | None = 2**19
     use_heuristic_warmup: bool = True
 

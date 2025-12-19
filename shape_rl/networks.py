@@ -156,7 +156,7 @@ class SpatialSoftmax(layers.Layer):
         self,
         temperature: float = 1.0,
         learnable: bool = True,
-        min_temperature: float = 0.2,
+        min_temperature: float = 0.4,
         max_temperature: float = 3.0,
         reg_coeff: float = 0.0,
         target_temperature: float | None = None,
@@ -575,7 +575,7 @@ class SpatialSoftmaxActorNetwork(network.Network):
         mean = base_mean + self.mean_residual(fused)
 
         logstd = self.logstd_head(fused)
-        logstd = tf.clip_by_value(logstd, -3.0, 1.0)
+        logstd = tf.clip_by_value(logstd, -2.5, 1.0)
         scale = tf.nn.softplus(logstd) + 1e-3
 
         dist = SquashedMultivariateNormalDiag(loc=mean,

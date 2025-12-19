@@ -248,7 +248,14 @@ def train(
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
-    alpha_lr = learning_rate * 0.3
+    alpha_lr = learning_rate * 0.2
+    critic_lr = learning_rate * 0.5
+
+    # Robust TD loss to tame critic spikes
+    huber_loss = tf.keras.losses.Huber(delta=1.0, reduction=tf.keras.losses.Reduction.NONE)
+
+    def _huber_td_loss(td_targets, td_predictions):
+        return huber_loss(td_targets, td_predictions)
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
@@ -256,16 +263,16 @@ def train(
         critic_network=critic_net_1,
         critic_network_2=critic_net_2,
         actor_optimizer=Adam(learning_rate, clipnorm=1.0),
-        critic_optimizer=Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=Adam(critic_lr, clipnorm=1.0),
         # Lower alpha LR and explicit target entropy to steady exploration temperature
         alpha_optimizer=Adam(alpha_lr, clipnorm=1.0),
-        target_entropy=-3.0,
-        target_update_tau=0.002,
+        target_entropy=-2.0,
+        target_update_tau=0.005,
         target_update_period=1,
-        td_errors_loss_fn=tf.math.squared_difference,
+        td_errors_loss_fn=_huber_td_loss,
         gamma=gamma,
-        # Slightly reduced reward scale factor to calm TD targets
-        reward_scale_factor=0.7,
+        # Reduced reward scale factor to calm TD targets
+        reward_scale_factor=0.4,
         train_step_counter=global_step
     )
     tf_agent.initialize()
