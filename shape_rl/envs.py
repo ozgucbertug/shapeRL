@@ -456,7 +456,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if (self._best_err - err_g_after) > self._plateau_tol:
             self._best_err = err_g_after
             self._plateau_counter = 0
-        elif self._step_count >= self._plateau_min_steps:
+        else:
             self._plateau_counter += 1
 
         # ----- early-termination checks -----
@@ -471,7 +471,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return self._terminate_episode(diff_after, err_g_after, reward)
 
         # Plateau early-stop: no meaningful improvement for a patience window
-        if (self._step_count >= self._plateau_min_steps and
+        if (self._step_count > self._plateau_min_steps and
                 self._plateau_counter >= self._plateau_patience):
             return self._terminate_episode(diff_after, err_g_after, reward)
 
