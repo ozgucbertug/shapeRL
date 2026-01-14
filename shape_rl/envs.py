@@ -97,6 +97,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._last_reward_terms: dict[str, float] = {}
         self._success_threshold = self._error_threshold
         self._plateau_tol = 0.0
+        self._token_scale = 0.0
 
         # Precompute a circular mask for footprint-local stats
         coords = np.indices((2 * self._tool_radius + 1, 2 * self._tool_radius + 1))
@@ -110,6 +111,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._work_diff    = np.empty((H, W), dtype=np.float32)
         self._env_norm_buf = np.empty((H, W), dtype=np.float32)
         self._tgt_norm_buf = np.empty((H, W), dtype=np.float32)
+        self._gx_buf       = np.empty((H, W), dtype=np.float32)
+        self._gy_buf       = np.empty((H, W), dtype=np.float32)
         self._grad_buf     = np.empty((H, W), dtype=np.float32)  # |∇diff|
         self._lap_buf      = np.empty((H, W), dtype=np.float32)  # Δ diff
         # [diff, env, tgt, grad, lap, scale_token]
@@ -192,26 +195,83 @@ class SandShapingEnv(py_environment.PyEnvironment):
         Compute 5-point Laplacian of `diff` with edge padding.
         Writes into self._lap_buf and returns it.
         """
-        padded = np.pad(diff, 1, mode='edge')
-        center = padded[1:-1, 1:-1]
         lap = self._lap_buf
-        # Δ = (N + S + E + W - 4C)
-        np.subtract(padded[2:, 1:-1], center, out=lap)   # S - C
-        lap += padded[:-2, 1:-1] - center                # + (N - C)
-        lap += padded[1:-1, 2:] - center                 # + (E - C)
-        lap += padded[1:-1, :-2] - center                # + (W - C)
+        if diff.shape[0] < 2 or diff.shape[1] < 2:
+            lap.fill(0.0)
+            return lap
+
+        # Interior
+        lap[1:-1, 1:-1] = (
+            diff[2:, 1:-1]
+            + diff[:-2, 1:-1]
+            + diff[1:-1, 2:]
+            + diff[1:-1, :-2]
+            - 4.0 * diff[1:-1, 1:-1]
+        )
+
+        # Edge rows
+        lap[0, 1:-1] = (
+            diff[1, 1:-1]
+            + diff[0, 1:-1]
+            + diff[0, 2:]
+            + diff[0, :-2]
+            - 4.0 * diff[0, 1:-1]
+        )
+        lap[-1, 1:-1] = (
+            diff[-2, 1:-1]
+            + diff[-1, 1:-1]
+            + diff[-1, 2:]
+            + diff[-1, :-2]
+            - 4.0 * diff[-1, 1:-1]
+        )
+
+        # Edge cols
+        lap[1:-1, 0] = (
+            diff[2:, 0]
+            + diff[:-2, 0]
+            + diff[1:-1, 1]
+            + diff[1:-1, 0]
+            - 4.0 * diff[1:-1, 0]
+        )
+        lap[1:-1, -1] = (
+            diff[2:, -1]
+            + diff[:-2, -1]
+            + diff[1:-1, -1]
+            + diff[1:-1, -2]
+            - 4.0 * diff[1:-1, -1]
+        )
+
+        # Corners
+        lap[0, 0] = diff[1, 0] + diff[0, 1] - 2.0 * diff[0, 0]
+        lap[0, -1] = diff[1, -1] + diff[0, -2] - 2.0 * diff[0, -1]
+        lap[-1, 0] = diff[-2, 0] + diff[-1, 1] - 2.0 * diff[-1, 0]
+        lap[-1, -1] = diff[-2, -1] + diff[-1, -2] - 2.0 * diff[-1, -1]
         return lap
+
+    def _finite_diff_grad(self, diff: np.ndarray, out_mag: np.ndarray) -> np.ndarray:
+        if diff.shape[0] < 2 or diff.shape[1] < 2:
+            out_mag.fill(0.0)
+            return out_mag
+        gx = self._gx_buf
+        gy = self._gy_buf
+        gx[:, 1:-1] = diff[:, 2:] - diff[:, :-2]
+        gy[1:-1, :] = diff[2:, :] - diff[:-2, :]
+        gx[:, 0] = diff[:, 1] - diff[:, 0]
+        gx[:, -1] = diff[:, -1] - diff[:, -2]
+        gy[0, :] = diff[1, :] - diff[0, :]
+        gy[-1, :] = diff[-1, :] - diff[-2, :]
+        np.sqrt(gx * gx + gy * gy, out=out_mag)
+        return out_mag
 
     def _update_grad_lap(self, diff_canon: np.ndarray):
         """Update gradient magnitude and Laplacian buffers with per-episode scaling."""
-        gy, gx = np.gradient(diff_canon)
-        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff| in canonical units per pixel
+        self._finite_diff_grad(diff_canon, self._grad_buf)  # |∇diff| in canonical units per pixel
         # Normalize by robust per-episode scale to stabilize magnitudes
         denom_grad = max(self._s_grad_canon, self._eps)
         self._grad_buf /= denom_grad
         np.clip(self._grad_buf, 0.0, 5.0, out=self._grad_buf)
 
-        lap = self._laplacian(diff_canon)  # writes into self._lap_buf
+        self._laplacian(diff_canon)  # writes into self._lap_buf
         denom_lap = max(self._s_lap_canon, self._eps)
         self._lap_buf /= denom_lap
         np.clip(self._lap_buf, -5.0, 5.0, out=self._lap_buf)
@@ -293,13 +353,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._obs_buf[..., 2] = self._tgt_norm_buf
         self._obs_buf[..., 3] = self._grad_buf
         self._obs_buf[..., 4] = self._lap_buf
-
-        # --- Single global scale token (constant plane per episode) ---
-        # log-scaled typical diff relative to one max press depth.
-        token_scale = float(np.log1p(max(self._s_diff, self._err0) / (depth_unit + self._eps)))
-        token_scale = float(np.clip(token_scale, -5.0, 5.0))
-        self._obs_buf[..., 5] = token_scale
-
+        # Channel 5 is filled once per episode in _reset.
         return self._obs_buf
 
     # ------------------------------------------------------------------ #
@@ -348,8 +402,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         abs_diff = np.abs(diff)
         self._s_diff = float(max(self._eps, np.percentile(abs_diff, 95.0)))
 
-        gy, gx = np.gradient(diff)
-        grad_mag = np.sqrt(gy * gy + gx * gx)
+        grad_mag = self._finite_diff_grad(diff, self._grad_buf)
         self._s_grad = float(max(self._eps, np.percentile(grad_mag, 95.0)))
         self._s_grad_canon = self._s_grad / max(self._depth_unit, self._eps)
 
@@ -366,6 +419,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._success_threshold = max(self._error_threshold,
                                       self._relative_success_frac * self._err0)
         self._plateau_tol = self._plateau_improve_tol * self._err0
+        self._token_scale = float(
+            np.log1p(max(self._s_diff, self._err0) / (self._depth_unit + self._eps))
+        )
+        self._token_scale = float(np.clip(self._token_scale, -5.0, 5.0))
+        self._obs_buf[..., 5].fill(self._token_scale)
 
         # Build first observation using the new per-episode scales
         obs = self._build_observation(diff, h, t)
