@@ -70,7 +70,7 @@ def train(
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
     checkpoint_interval: int | None = None,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 3e-4,
     run_name: str | None = None,
 ):
     tqdm.write("[Init] Starting training setup")

@@ -24,7 +24,7 @@ class TrainingConfig:
     num_updates: int = 500_000
     batch_size: int = 256
     collect_steps_per_update: int = 4
-    learning_rate: float = 1e-4
+    learning_rate: float = 3e-4
 
     # Warm-up/Replay bootstrap
     initial_collect_steps: int | None = 2**16
