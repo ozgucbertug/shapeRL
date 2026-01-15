@@ -30,7 +30,11 @@ from tf_agents.utils import common as common_utils
 
 from shape_rl.envs import SandShapingEnv
 from shape_rl.metrics import compute_eval, print_eval_metrics, log_eval_metric_curves, summarize_metric_series
-from shape_rl.policies import HeuristicPressPolicy
+from shape_rl.policies import (
+    HeuristicPressPolicy,
+    HeuristicFootprintPressPolicy,
+    HeuristicLookaheadPressPolicy,
+)
 from datetime import datetime
 
 # Import network architectures
@@ -488,7 +492,7 @@ def train(
     tqdm.write("[Drivers] Collection driver prepared")
 
     # --- Evaluate heuristic policy performance on raw PyEnvironment ---
-    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baseline")
+    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baselines")
     heuristic_policy = HeuristicPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
@@ -504,9 +508,46 @@ def train(
         num_eval_episodes,
         base_seed=eval_base_seed,
     )
-    print_eval_metrics(heur_metrics, header="Heuristic Eval")
+    print_eval_metrics(heur_metrics, header="Heuristic Greedy Eval")
     if log_eval_curves:
         log_eval_metric_curves(heur_metrics, logdir, run_name="eval_heuristic")
+
+    footprint_policy = HeuristicFootprintPressPolicy(
+        time_step_spec=train_py_env.time_step_spec(),
+        action_spec=action_spec,
+        width=eval_py_env._width,
+        height=eval_py_env._height,
+        tool_radius=eval_py_env._tool_radius,
+        amp_max=eval_py_env._amplitude_range[1],
+    )
+    footprint_metrics = compute_eval(
+        eval_env_factory,
+        footprint_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
+    print_eval_metrics(footprint_metrics, header="Heuristic Footprint Eval")
+    if log_eval_curves:
+        log_eval_metric_curves(footprint_metrics, logdir, run_name="eval_heuristic_footprint")
+
+    lookahead_policy = HeuristicLookaheadPressPolicy(
+        time_step_spec=train_py_env.time_step_spec(),
+        action_spec=action_spec,
+        width=eval_py_env._width,
+        height=eval_py_env._height,
+        tool_radius=eval_py_env._tool_radius,
+        amp_max=eval_py_env._amplitude_range[1],
+        alpha_over=getattr(eval_py_env, "_alpha_over", 0.5),
+    )
+    lookahead_metrics = compute_eval(
+        eval_env_factory,
+        lookahead_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
+    print_eval_metrics(lookahead_metrics, header="Heuristic Lookahead Eval")
+    if log_eval_curves:
+        log_eval_metric_curves(lookahead_metrics, logdir, run_name="eval_heuristic_lookahead")
 
     # Warm-up buffer: heuristic or random
     def _num_frames() -> int:
