@@ -14,25 +14,25 @@ from shape_rl.training import train as _train
 class TrainingConfig:
     # Environment
     seed: int | None = None
-    num_parallel_envs: int = 128
+    num_parallel_envs: int = 64
     env_debug: bool = True
 
     # Model
-    encoder_type: str = 'spatial_softmax'
+    encoder_type: str = 'spatial_film'
 
     # Training loop
-    num_updates: int = 200_000
-    batch_size: int = 512
-    collect_steps_per_update: int = 8
-    learning_rate: float = 1e-4
+    num_updates: int = 500_000
+    batch_size: int = 256
+    collect_steps_per_update: int = 4
+    learning_rate: float = 3e-4
 
     # Warm-up/Replay bootstrap
-    initial_collect_steps: int | None = 2**17
+    initial_collect_steps: int | None = 2**16
     replay_capacity_total: int | None = 2**19
     use_heuristic_warmup: bool = True
 
     # Evaluation
-    num_eval_episodes: int = 1
+    num_eval_episodes: int = 8
     eval_interval: int = 5_000
     log_eval_curves: bool = True
 
@@ -40,6 +40,7 @@ class TrainingConfig:
     log_interval: int = 1_000
     checkpoint_interval: int | None = 5_000
     debug: bool = False
+    run_name: str | None = None
 
 
 # Edit these defaults to change training behaviour without touching library code.
@@ -64,8 +65,10 @@ def _parser(defaults: TrainingConfig) -> argparse.ArgumentParser:
 
     model_group = parser.add_argument_group("Model")
     model_group.add_argument("--encoder_type", type=str, default=defaults.encoder_type,
-                             choices=["cnn", "spatial_softmax", "spatial_k"],
+                             choices=["cnn", "spatial_softmax", "spatial_k", "spatial_film", "spatial_k_film"],
                              help="Backbone encoder architecture for actor/critic")
+    model_group.add_argument("--run_name", type=str, default=defaults.run_name,
+                             help="Optional name for the log/checkpoint folder (defaults to timestamp)")
 
     train_group = parser.add_argument_group("Training loop")
     train_group.add_argument("--num_updates", type=int, default=defaults.num_updates,
@@ -146,6 +149,7 @@ def run(config: Optional[TrainingConfig] = None) -> None:
         log_eval_curves=cfg.log_eval_curves,
         checkpoint_interval=cfg.checkpoint_interval,
         learning_rate=cfg.learning_rate,
+        run_name=cfg.run_name,
     )
 
 

@@ -24,19 +24,27 @@ from tf_agents.policies import random_tf_policy
 from tf_agents.agents.sac import sac_agent
 from tf_agents.networks import actor_distribution_network
 from tf_agents.agents.ddpg.critic_network import CriticNetwork
+from tf_agents.policies import greedy_policy
 from tf_agents.utils import common as common_utils
 
 
 from shape_rl.envs import SandShapingEnv
 from shape_rl.metrics import compute_eval, print_eval_metrics, log_eval_metric_curves, summarize_metric_series
-from shape_rl.policies import HeuristicPressPolicy
+from shape_rl.policies import (
+    HeuristicPressPolicy,
+    HeuristicFootprintPressPolicy,
+    HeuristicLookaheadPressPolicy,
+)
 from datetime import datetime
 
 # Import network architectures
 from shape_rl.networks import (
     SpatialKActorNetwork,
     SpatialSoftmaxActorNetwork,
-    SpatialSoftmaxCriticNetwork,
+    # SpatialSoftmaxCriticNetwork,
+    SpatialValueMapCriticNetwork,
+    SpatialSoftmaxEncoder,
+    SpatialFiLMEncoder,
 )
 
 __all__ = ["train"]
@@ -50,10 +58,10 @@ def _make_env(seed: int | None, debug: bool = False) -> callable:
 
 
 def train(
-    num_parallel_envs: int = 4,
+    num_parallel_envs: int = 64,
     eval_interval: int = 5000,
     seed: int | None = None,
-    batch_size: int = 16,
+    batch_size: int = 256,
     collect_steps_per_update: int = 4,
     num_updates: int = 200000,
     num_eval_episodes: int = 5,
@@ -65,8 +73,9 @@ def train(
     env_debug: bool = True,
     replay_capacity_total: int | None = None,
     log_eval_curves: bool = False,
-    checkpoint_interval: int | None = 50_000,
-    learning_rate: float = 3e-4
+    checkpoint_interval: int | None = None,
+    learning_rate: float = 3e-4,
+    run_name: str | None = None,
 ):
     tqdm.write("[Init] Starting training setup")
     if seed is not None:
@@ -136,20 +145,84 @@ def train(
     action_spec = train_env.action_spec()
 
     if encoder_type == 'spatial_softmax':
-        actor_net = SpatialSoftmaxActorNetwork(observation_spec, action_spec)
-        critic_net_1 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        actor_net = SpatialSoftmaxActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialSoftmaxEncoder,
         )
-        critic_net_2 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+    elif encoder_type == 'spatial_film':
+        actor_net = SpatialSoftmaxActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
         )
     elif encoder_type == 'spatial_k':
-        actor_net = SpatialKActorNetwork(observation_spec, action_spec)
-        critic_net_1 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_1'
+        actor_net = SpatialKActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialSoftmaxEncoder,
         )
-        critic_net_2 = SpatialSoftmaxCriticNetwork(
-            observation_spec, action_spec, name='SpatialSoftmaxCriticNetwork_2'
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialSoftmaxEncoder,
+        )
+    elif encoder_type == 'spatial_k_film':
+        actor_net = SpatialKActorNetwork(
+            observation_spec,
+            action_spec,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_1 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_1',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
+        )
+        critic_net_2 = SpatialValueMapCriticNetwork(
+            observation_spec,
+            action_spec,
+            name='SpatialValueMapCriticNetwork_2',
+            use_heatmap=False,
+            encoder_cls=SpatialFiLMEncoder,
         )
     elif encoder_type == 'cnn':
         conv_params = ((32, 3, 2), (64, 3, 2), (128, 3, 2))
@@ -180,6 +253,17 @@ def train(
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
+    alpha_lr = learning_rate * 0.2
+    critic_lr = learning_rate * 0.5
+
+    # Robust TD loss to tame critic spikes (element-wise to satisfy per-sample loss requirement)
+    def _huber_td_loss(td_targets, td_predictions, delta: float = 1.0):
+        error = td_predictions - td_targets
+        delta_t = tf.cast(delta, error.dtype)
+        abs_error = tf.abs(error)
+        quadratic = tf.minimum(abs_error, delta_t)
+        linear = abs_error - quadratic
+        return 0.5 * tf.square(quadratic) + delta_t * linear - 0.5 * tf.square(delta_t)
     tf_agent = sac_agent.SacAgent(
         time_step_spec=train_env.time_step_spec(),
         action_spec=action_spec,
@@ -187,16 +271,20 @@ def train(
         critic_network=critic_net_1,
         critic_network_2=critic_net_2,
         actor_optimizer=Adam(learning_rate, clipnorm=1.0),
-        critic_optimizer=Adam(learning_rate, clipnorm=1.0),
-        alpha_optimizer=Adam(learning_rate, clipnorm=1.0),
+        critic_optimizer=Adam(critic_lr, clipnorm=1.0),
+        # Lower alpha LR and explicit target entropy to steady exploration temperature
+        alpha_optimizer=Adam(alpha_lr, clipnorm=1.0),
+        target_entropy=-2.0,
         target_update_tau=0.005,
         target_update_period=1,
-        td_errors_loss_fn=tf.math.squared_difference,
+        td_errors_loss_fn=_huber_td_loss,
         gamma=gamma,
-        reward_scale_factor=1.0,
+        # Reduced reward scale factor to calm TD targets
+        reward_scale_factor=0.4,
         train_step_counter=global_step
     )
     tf_agent.initialize()
+    eval_policy = greedy_policy.GreedyPolicy(tf_agent.policy)
 
     def log_spatialsoftmax_temperature(step_val: int):
         try:
@@ -211,36 +299,114 @@ def train(
                 pass
 
     def log_eval_summaries(metrics: dict, step_val: int):
-        rmse_summary = summarize_metric_series(metrics.get('rmse_series_mean') or [])
-        mae_summary = summarize_metric_series(metrics.get('mae_series_mean') or [])
-        w2_summary = summarize_metric_series(metrics.get('w2_series_mean') or [])
-        steps_mean = metrics.get('steps_mean')
-        if steps_mean is not None:
-            steps_mean = float(steps_mean)
+        rmse_summary = summarize_metric_series(metrics.get('rmse_series_list'))
+        mae_summary = summarize_metric_series(metrics.get('mae_series_list'))
+        w2_summary = summarize_metric_series(metrics.get('w2_series_list'))
+        steps_series = metrics.get('steps_series_list')
 
-        tf.summary.scalar('eval/rmse_delta', rmse_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/rmse_auc_norm', rmse_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/rmse_slope', rmse_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/rmse_pos_frac', rmse_summary['pos_improve_frac'], step=step_val)
+        reward_series = metrics.get('reward_series_list') or []
+        episode_returns: list[float] = []
+        for curve in reward_series:
+            episode_returns.append(float(np.nanmean(curve)))
 
-        tf.summary.scalar('eval/mae_delta', mae_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/mae_auc_norm', mae_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/mae_slope', mae_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/mae_pos_frac', mae_summary['pos_improve_frac'], step=step_val)
+        def _per_episode_corr(metric_series_list):
+            rewards = []
+            improves = []
+            for r_curve, m_series in zip(reward_series, metric_series_list or []):
+                if not r_curve or not m_series:
+                    continue
+                try:
+                    r_mean = float(np.nanmean(r_curve))
+                    m_improve = summarize_metric_series(m_series).get('relative_improvement', np.nan)
+                except Exception:
+                    continue
+                if np.isfinite(r_mean) and np.isfinite(m_improve):
+                    rewards.append(r_mean)
+                    improves.append(m_improve)
+            if len(rewards) > 1:
+                r_arr = np.asarray(rewards, dtype=np.float64)
+                m_arr = np.asarray(improves, dtype=np.float64)
+                mask = np.isfinite(r_arr) & np.isfinite(m_arr)
+                if np.count_nonzero(mask) > 1:
+                    return float(np.corrcoef(r_arr[mask], m_arr[mask])[0, 1])
+            return np.nan
 
-        tf.summary.scalar('eval/w2_delta', w2_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/w2_auc_norm', w2_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/w2_slope', w2_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/w2_pos_frac', w2_summary['pos_improve_frac'], step=step_val)
-        if steps_mean is not None:
-            tf.summary.scalar('eval/steps_mean', steps_mean, step=step_val)
+        def _per_step_corr(metric_series_list):
+            rewards_flat = []
+            deltas_flat = []
+            for r_curve, m_series in zip(reward_series, metric_series_list or []):
+                if not r_curve or len(m_series) < 2:
+                    continue
+                try:
+                    rewards = np.asarray(r_curve[1:], dtype=np.float64)
+                    metric_vals = np.asarray(m_series, dtype=np.float64)
+                    deltas = np.diff(metric_vals)
+                    min_len = min(rewards.size, deltas.size)
+                    if min_len <= 1:
+                        continue
+                    rewards = rewards[:min_len]
+                    deltas = deltas[:min_len]
+                    mask = np.isfinite(rewards) & np.isfinite(deltas)
+                    if mask.any():
+                        rewards_flat.append(rewards[mask])
+                        deltas_flat.append(deltas[mask])
+                except Exception:
+                    continue
+            if rewards_flat and deltas_flat:
+                r_all = np.concatenate(rewards_flat)
+                d_all = np.concatenate(deltas_flat)
+                mask = np.isfinite(r_all) & np.isfinite(d_all)
+                if np.count_nonzero(mask) > 1:
+                    return float(np.corrcoef(r_all[mask], d_all[mask])[0, 1])
+            return np.nan
+
+        corr_ep_rmse = _per_episode_corr(metrics.get('rmse_series_list'))
+        corr_ep_mae = _per_episode_corr(metrics.get('mae_series_list'))
+        corr_ep_w2 = _per_episode_corr(metrics.get('w2_series_list'))
+
+        corr_step_rmse = _per_step_corr(metrics.get('rmse_series_list'))
+        corr_step_mae = _per_step_corr(metrics.get('mae_series_list'))
+        corr_step_w2 = _per_step_corr(metrics.get('w2_series_list'))
+
+        # Group tags so RMSE/MAE/W2 for each statistic share a single TensorBoard chart.
+        tf.summary.scalar('eval/delta_norm/rmse', rmse_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta_norm/mae', mae_summary['delta'], step=step_val)
+        tf.summary.scalar('eval/delta_norm/w2', w2_summary['delta'], step=step_val)
+
+        tf.summary.scalar('eval/auc_norm/rmse', rmse_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/auc_norm/mae', mae_summary['auc_norm'], step=step_val)
+        tf.summary.scalar('eval/auc_norm/w2', w2_summary['auc_norm'], step=step_val)
+
+        tf.summary.scalar('eval/slope_norm/rmse', rmse_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope_norm/mae', mae_summary['slope'], step=step_val)
+        tf.summary.scalar('eval/slope_norm/w2', w2_summary['slope'], step=step_val)
+
+        tf.summary.scalar('eval/pos_frac/rmse', rmse_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/pos_frac/mae', mae_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
+        tf.summary.scalar('eval/_steps_mean', float(np.mean(steps_series)), step=step_val)
+        if episode_returns:
+            tf.summary.scalar('eval/return_mean', float(np.mean(episode_returns)), step=step_val)
+        if np.isfinite(corr_ep_rmse):
+            tf.summary.scalar('eval/per_ep_corr/rmse', corr_ep_rmse, step=step_val)
+        if np.isfinite(corr_ep_mae):
+            tf.summary.scalar('eval/per_ep_corr/mae', corr_ep_mae, step=step_val)
+        if np.isfinite(corr_ep_w2):
+            tf.summary.scalar('eval/per_ep_corr/w2', corr_ep_w2, step=step_val)
+        if np.isfinite(corr_step_rmse):
+            tf.summary.scalar('eval/per_step_corr/rmse', corr_step_rmse, step=step_val)
+        if np.isfinite(corr_step_mae):
+            tf.summary.scalar('eval/per_step_corr/mae', corr_step_mae, step=step_val)
+        if np.isfinite(corr_step_w2):
+            tf.summary.scalar('eval/per_step_corr/w2', corr_step_w2, step=step_val)
 
         return rmse_summary, mae_summary, w2_summary
 
     # ---- logging setup ----
     log_root = 'logs'
     os.makedirs(log_root, exist_ok=True)
-    logdir = os.path.join(log_root, datetime.now().strftime('%Y%m%d-%H%M%S'))
+    ts_name = datetime.now().strftime('%Y%m%d-%H%M%S')
+    logdir = os.path.join(log_root, run_name if run_name else ts_name)
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
     tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
@@ -326,7 +492,7 @@ def train(
     tqdm.write("[Drivers] Collection driver prepared")
 
     # --- Evaluate heuristic policy performance on raw PyEnvironment ---
-    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baseline")
+    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baselines")
     heuristic_policy = HeuristicPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
@@ -336,10 +502,52 @@ def train(
         amp_max=eval_py_env._amplitude_range[1],
     )
     # Evaluate heuristic with the unified compute_eval for consistency
-    heur_metrics = compute_eval(eval_env_factory, heuristic_policy, num_eval_episodes, base_seed=eval_base_seed)
-    print_eval_metrics(heur_metrics, header="Heuristic Eval")
+    heur_metrics = compute_eval(
+        eval_env_factory,
+        heuristic_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
+    print_eval_metrics(heur_metrics, header="Heuristic Greedy Eval")
     if log_eval_curves:
         log_eval_metric_curves(heur_metrics, logdir, run_name="eval_heuristic")
+
+    footprint_policy = HeuristicFootprintPressPolicy(
+        time_step_spec=train_py_env.time_step_spec(),
+        action_spec=action_spec,
+        width=eval_py_env._width,
+        height=eval_py_env._height,
+        tool_radius=eval_py_env._tool_radius,
+        amp_max=eval_py_env._amplitude_range[1],
+    )
+    footprint_metrics = compute_eval(
+        eval_env_factory,
+        footprint_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
+    print_eval_metrics(footprint_metrics, header="Heuristic Footprint Eval")
+    if log_eval_curves:
+        log_eval_metric_curves(footprint_metrics, logdir, run_name="eval_heuristic_footprint")
+
+    lookahead_policy = HeuristicLookaheadPressPolicy(
+        time_step_spec=train_py_env.time_step_spec(),
+        action_spec=action_spec,
+        width=eval_py_env._width,
+        height=eval_py_env._height,
+        tool_radius=eval_py_env._tool_radius,
+        amp_max=eval_py_env._amplitude_range[1],
+        alpha_over=getattr(eval_py_env, "_alpha_over", 0.5),
+    )
+    lookahead_metrics = compute_eval(
+        eval_env_factory,
+        lookahead_policy,
+        num_eval_episodes,
+        base_seed=eval_base_seed,
+    )
+    print_eval_metrics(lookahead_metrics, header="Heuristic Lookahead Eval")
+    if log_eval_curves:
+        log_eval_metric_curves(lookahead_metrics, logdir, run_name="eval_heuristic_lookahead")
 
     # Warm-up buffer: heuristic or random
     def _num_frames() -> int:
@@ -590,7 +798,12 @@ def train(
                     tqdm.write(f"[Checkpoint] Failed to save periodic checkpoint: {checkpoint_err}")
             if eval_interval > 0 and update % eval_interval == 0:
                 # Detailed evaluation metrics
-                metrics = compute_eval(eval_env_factory, tf_agent.policy, num_eval_episodes, base_seed=eval_base_seed)
+                metrics = compute_eval(
+                    eval_env_factory,
+                    eval_policy,
+                    num_eval_episodes,
+                    base_seed=eval_base_seed,
+                )
                 rmse_summary, mae_summary, w2_summary = log_eval_summaries(metrics, update)
 
                 # Log per-update eval curves as native TensorBoard scalars in a separate run dir

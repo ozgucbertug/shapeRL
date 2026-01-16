@@ -10,14 +10,19 @@ from functools import lru_cache
 _PERLIN_GRID_CACHE: dict[tuple[tuple[int, int], tuple[int, int]], tuple[np.ndarray, ...]] = {}
 
 
-def _get_perlin_grid(shape: tuple[int, int], res: tuple[int, int]):
+def _get_perlin_grid(shape: tuple[int, int], res: tuple[float, float]):
     """Return cached Perlin coordinate grids for a given shape and resolution."""
-    key = (shape, res)
-    if key in _PERLIN_GRID_CACHE:
-        return _PERLIN_GRID_CACHE[key]
-
     height, width = shape
-    res_x, res_y = res
+    res_x = float(res[0])
+    res_y = float(res[1])
+
+    use_cache = res_x.is_integer() and res_y.is_integer()
+    cache_key = None
+    if use_cache:
+        cache_key = (shape, (int(res_x), int(res_y)))
+        cached = _PERLIN_GRID_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
     xs = np.linspace(0, res_x, width, endpoint=False, dtype=np.float32)
     ys = np.linspace(res_y, 0, height, endpoint=False, dtype=np.float32)
@@ -30,15 +35,29 @@ def _get_perlin_grid(shape: tuple[int, int], res: tuple[int, int]):
     u = fade(xf)
     v = fade(yf)
 
-    _PERLIN_GRID_CACHE[key] = (xi, yi, xf, yf, u, v)
-    return _PERLIN_GRID_CACHE[key]
+    grid = (xi, yi, xf, yf, u, v)
+    if use_cache and cache_key is not None:
+        _PERLIN_GRID_CACHE[cache_key] = grid
+    return grid
+
+
+def _get_perlin_gradients_uncached(res_0, res_1):
+    rng = default_rng()
+    angles = 2 * np.pi * rng.random((res_0 + 1, res_1 + 1))
+    return np.stack((np.cos(angles), np.sin(angles)), axis=-1)
 
 
 @lru_cache(maxsize=32)
-def _get_perlin_gradients(res_0, res_1, seed):
+def _get_perlin_gradients_seeded(res_0, res_1, seed):
     rng = default_rng(seed)
     angles = 2 * np.pi * rng.random((res_0 + 1, res_1 + 1))
     return np.stack((np.cos(angles), np.sin(angles)), axis=-1)
+
+
+def _get_perlin_gradients(res_0, res_1, seed):
+    if seed is None:
+        return _get_perlin_gradients_uncached(res_0, res_1)
+    return _get_perlin_gradients_seeded(res_0, res_1, int(seed))
 
 
 def fade(t):
@@ -47,10 +66,12 @@ def fade(t):
 
 
 def generate_perlin_noise_2d(shape, res, amplitude=1.0, seed=None):
-    res_0 = int(res[0])
-    res_1 = int(res[1])
+    res_x = float(res[0])
+    res_y = float(res[1])
+    res_0 = max(1, int(np.ceil(res_x)))
+    res_1 = max(1, int(np.ceil(res_y)))
 
-    xi, yi, xf, yf, u, v = _get_perlin_grid(shape, (res_0, res_1))
+    xi, yi, xf, yf, u, v = _get_perlin_grid(shape, (res_x, res_y))
     gradients = _get_perlin_gradients(res_0, res_1, seed)
 
     def dot_grad(ix, iy, x, y):

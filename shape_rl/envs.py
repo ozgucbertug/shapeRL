@@ -18,12 +18,12 @@ class SandShapingEnv(py_environment.PyEnvironment):
         amplitude_range=(10.0, 40.0),
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         tool_radius: int = 5,
-        max_steps: int = 1024,
+        max_steps: int = 2048,
         max_push_mult: float = 1.0,
         # ── TERMINATION & OUTCOME BONUSES ─────────────────────────
         error_threshold: float = 0.05,
         relative_success_frac: float = 0.05,
-        plateau_min_steps: int = 64,
+        plateau_min_steps: int = 32,
         plateau_patience: int = 16,
         plateau_improve_tol: float = 0.001,
         success_bonus: float = 1.0,
@@ -54,6 +54,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._s_lap  = 1.0
         self._s_env_h = 1.0
         self._s_tgt_h = 1.0
+        self._s_grad_canon = 1.0
+        self._s_lap_canon = 1.0
 
         # ── TOOL / ACTION & EPISODE HORIZON ───────────────────────
         self._tool_radius = tool_radius
@@ -72,15 +74,22 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._plateau_improve_tol   = plateau_improve_tol
 
         # ── REWARD SHAPING / SCALING KNOBS ────────────────────────
-        self._eps = 1e-6
-        self._lambda_surplus = 1.0   # weight on surplus MAE
-        self._lambda_deficit = 5.0   # stronger cost on deficits
-        self._beta_grad = 0.1        # light gradient match on surplus
-        self._k_deficit = 2.0        # penalty when deficits grow
-        self._k_overcut = 0.5        # penalty for cutting below target locally
-        self._alpha_over = 0.5       # overcut tolerance in depth units
-        self._reward_scale = 10.0
+        self._eps                  = 1e-6
+        # Softer penalties and reward scale to stabilize critic targets
+        self._k_deficit  = 1.5
+        self._k_overcut  = 0.35
+        self._alpha_over = 0.5
+        self._reward_scale = 4.0
         self._vol_reg = 0.1
+
+        # Additional reward shaping / safety weights
+        self._lambda_rmse = 2.0            # weight on global RMSE improvement
+        self._lambda_mae = 1.5             # weight on global MAE improvement
+        self._lambda_local_surplus = 1.25  # reward for removing surplus in the pressed footprint
+        self._lambda_local_grad = 0.2      # encourage local smoothing on surplus
+        self._k_local_deficit = 2.5        # penalize new local deficits created by the press
+        self._k_center_deficit = 2.0       # barrier if the press is commanded in a deficit
+        self._overcut_vol_scale = 1.0      # scale overcut penalty by removed volume
 
         self._local_radius = 1 * self._tool_radius
         self._max_press_volume = self._compute_max_press_volume()
@@ -88,12 +97,22 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._last_reward_terms: dict[str, float] = {}
         self._success_threshold = self._error_threshold
         self._plateau_tol = 0.0
+        self._token_scale = 0.0
+
+        # Precompute a circular mask for footprint-local stats
+        coords = np.indices((2 * self._tool_radius + 1, 2 * self._tool_radius + 1))
+        dy = coords[0] - self._tool_radius
+        dx = coords[1] - self._tool_radius
+        self._disk_mask = (dx * dx + dy * dy <= self._tool_radius * self._tool_radius).astype(np.float32)
+        self._disk_area = float(np.sum(self._disk_mask))
 
         # ── INTERNAL WORK BUFFERS ─────────────────────────────────
         H, W = self._patch_height, self._patch_width
         self._work_diff    = np.empty((H, W), dtype=np.float32)
         self._env_norm_buf = np.empty((H, W), dtype=np.float32)
         self._tgt_norm_buf = np.empty((H, W), dtype=np.float32)
+        self._gx_buf       = np.empty((H, W), dtype=np.float32)
+        self._gy_buf       = np.empty((H, W), dtype=np.float32)
         self._grad_buf     = np.empty((H, W), dtype=np.float32)  # |∇diff|
         self._lap_buf      = np.empty((H, W), dtype=np.float32)  # Δ diff
         # [diff, env, tgt, grad, lap, scale_token]
@@ -181,24 +200,131 @@ class SandShapingEnv(py_environment.PyEnvironment):
         Compute 5-point Laplacian of `diff` with edge padding.
         Writes into self._lap_buf and returns it.
         """
-        padded = np.pad(diff, 1, mode='edge')
-        center = padded[1:-1, 1:-1]
         lap = self._lap_buf
-        # Δ = (N + S + E + W - 4C)
-        np.subtract(padded[2:, 1:-1], center, out=lap)   # S - C
-        lap += padded[:-2, 1:-1] - center                # + (N - C)
-        lap += padded[1:-1, 2:] - center                 # + (E - C)
-        lap += padded[1:-1, :-2] - center                # + (W - C)
+        if diff.shape[0] < 2 or diff.shape[1] < 2:
+            lap.fill(0.0)
+            return lap
+
+        # Interior
+        lap[1:-1, 1:-1] = (
+            diff[2:, 1:-1]
+            + diff[:-2, 1:-1]
+            + diff[1:-1, 2:]
+            + diff[1:-1, :-2]
+            - 4.0 * diff[1:-1, 1:-1]
+        )
+
+        # Edge rows
+        lap[0, 1:-1] = (
+            diff[1, 1:-1]
+            + diff[0, 1:-1]
+            + diff[0, 2:]
+            + diff[0, :-2]
+            - 4.0 * diff[0, 1:-1]
+        )
+        lap[-1, 1:-1] = (
+            diff[-2, 1:-1]
+            + diff[-1, 1:-1]
+            + diff[-1, 2:]
+            + diff[-1, :-2]
+            - 4.0 * diff[-1, 1:-1]
+        )
+
+        # Edge cols
+        lap[1:-1, 0] = (
+            diff[2:, 0]
+            + diff[:-2, 0]
+            + diff[1:-1, 1]
+            + diff[1:-1, 0]
+            - 4.0 * diff[1:-1, 0]
+        )
+        lap[1:-1, -1] = (
+            diff[2:, -1]
+            + diff[:-2, -1]
+            + diff[1:-1, -1]
+            + diff[1:-1, -2]
+            - 4.0 * diff[1:-1, -1]
+        )
+
+        # Corners
+        lap[0, 0] = diff[1, 0] + diff[0, 1] - 2.0 * diff[0, 0]
+        lap[0, -1] = diff[1, -1] + diff[0, -2] - 2.0 * diff[0, -1]
+        lap[-1, 0] = diff[-2, 0] + diff[-1, 1] - 2.0 * diff[-1, 0]
+        lap[-1, -1] = diff[-2, -1] + diff[-1, -2] - 2.0 * diff[-1, -1]
         return lap
 
+    def _finite_diff_grad(self, diff: np.ndarray, out_mag: np.ndarray) -> np.ndarray:
+        if diff.shape[0] < 2 or diff.shape[1] < 2:
+            out_mag.fill(0.0)
+            return out_mag
+        gx = self._gx_buf
+        gy = self._gy_buf
+        gx[:, 1:-1] = diff[:, 2:] - diff[:, :-2]
+        gy[1:-1, :] = diff[2:, :] - diff[:-2, :]
+        gx[:, 0] = diff[:, 1] - diff[:, 0]
+        gx[:, -1] = diff[:, -1] - diff[:, -2]
+        gy[0, :] = diff[1, :] - diff[0, :]
+        gy[-1, :] = diff[-1, :] - diff[-2, :]
+        np.sqrt(gx * gx + gy * gy, out=out_mag)
+        return out_mag
+
     def _update_grad_lap(self, diff_canon: np.ndarray):
-        """Update gradient magnitude and Laplacian buffers in canonical units."""
-        gy, gx = np.gradient(diff_canon)
-        np.sqrt(gy * gy + gx * gx, out=self._grad_buf)  # |∇diff| in canonical units per pixel
+        """Update gradient magnitude and Laplacian buffers with per-episode scaling."""
+        self._finite_diff_grad(diff_canon, self._grad_buf)  # |∇diff| in canonical units per pixel
+        # Normalize by robust per-episode scale to stabilize magnitudes
+        denom_grad = max(self._s_grad_canon, self._eps)
+        self._grad_buf /= denom_grad
         np.clip(self._grad_buf, 0.0, 5.0, out=self._grad_buf)
 
-        lap = self._laplacian(diff_canon)  # writes into self._lap_buf
+        self._laplacian(diff_canon)  # writes into self._lap_buf
+        denom_lap = max(self._s_lap_canon, self._eps)
+        self._lap_buf /= denom_lap
         np.clip(self._lap_buf, -5.0, 5.0, out=self._lap_buf)
+
+    def _disk_stats(self, diff: np.ndarray, cx: int, cy: int) -> tuple[float, float, float]:
+        """Compute surplus/deficit/gradient stats inside the circular footprint."""
+        r = self._tool_radius
+        patch = diff[cy - r:cy + r + 1, cx - r:cx + r + 1]
+        mask = self._disk_mask
+        # Surplus-only structures
+        surplus = np.maximum(patch, 0.0) * mask
+        gy, gx = np.gradient(surplus)
+        grad_l1 = float(np.mean(np.abs(gy)) + np.mean(np.abs(gx)))
+
+        # Mean surplus/deficit within the footprint
+        surplus_mae = float(np.sum(surplus) / max(self._disk_area, self._eps))
+        deficit_mae = float(np.sum(np.maximum(-patch, 0.0) * mask) / max(self._disk_area, self._eps))
+        return surplus_mae, deficit_mae, grad_l1
+
+    def _gather_metrics(self, diff: np.ndarray, cx: int, cy: int, err_global: float | None = None) -> dict[str, float]:
+        """Collect global and footprint-local metrics around (cx, cy)."""
+        if err_global is None:
+            err_global = float(np.sqrt(np.mean(diff ** 2)))
+        err_local = self._local_rmse(diff, cx, cy, self._local_radius)
+        rmse_sup = self._surplus_rmse(diff)
+        deficit = self._deficit_volume(diff)
+        mae = float(np.mean(np.abs(diff)))
+
+        r = self._local_radius
+        y0 = max(cy - r, 0)
+        y1 = min(cy + r + 1, self._height)
+        x0 = max(cx - r, 0)
+        x1 = min(cx + r + 1, self._width)
+        local_min = float(np.min(diff[y0:y1, x0:x1]))
+
+        loc_surplus, loc_def, loc_grad = self._disk_stats(diff, cx, cy)
+        return {
+            'rmse_global': float(err_global),
+            'rmse_local': float(err_local),
+            'rmse_surplus': float(rmse_sup),
+            'deficit': float(deficit),
+            'mae': mae,
+            'local_min': local_min,
+            'loc_surplus': float(loc_surplus),
+            'loc_def': float(loc_def),
+            'loc_grad': float(loc_grad),
+            'diff_center': float(diff[cy, cx]),
+        }
 
     # ------------------------------------------------------------------ #
     # Utility: build observation tensor                                  #
@@ -232,13 +358,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._obs_buf[..., 2] = self._tgt_norm_buf
         self._obs_buf[..., 3] = self._grad_buf
         self._obs_buf[..., 4] = self._lap_buf
-
-        # --- Single global scale token (constant plane per episode) ---
-        # log-scaled typical diff relative to one max press depth.
-        token_scale = float(np.log1p(max(self._s_diff, self._err0) / (depth_unit + self._eps)))
-        token_scale = float(np.clip(token_scale, -5.0, 5.0))
-        self._obs_buf[..., 5] = token_scale
-
+        # Channel 5 is filled once per episode in _reset.
         return self._obs_buf
 
     # ------------------------------------------------------------------ #
@@ -287,13 +407,14 @@ class SandShapingEnv(py_environment.PyEnvironment):
         abs_diff = np.abs(diff)
         self._s_diff = float(max(self._eps, np.percentile(abs_diff, 95.0)))
 
-        gy, gx = np.gradient(diff)
-        grad_mag = np.sqrt(gy * gy + gx * gx)
+        grad_mag = self._finite_diff_grad(diff, self._grad_buf)
         self._s_grad = float(max(self._eps, np.percentile(grad_mag, 95.0)))
+        self._s_grad_canon = self._s_grad / max(self._depth_unit, self._eps)
 
         lap = self._laplacian(diff)  # writes into self._lap_buf
         abs_lap = np.abs(lap)
         self._s_lap = float(max(self._eps, np.percentile(abs_lap, 95.0)))
+        self._s_lap_canon = self._s_lap / max(self._depth_unit, self._eps)
 
         # Initial global error
         self._err0 = float(np.sqrt(np.mean(diff**2))) + self._eps
@@ -303,6 +424,11 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._success_threshold = max(self._error_threshold,
                                       self._relative_success_frac * self._err0)
         self._plateau_tol = self._plateau_improve_tol * self._err0
+        self._token_scale = float(
+            np.log1p(max(self._s_diff, self._err0) / (self._depth_unit + self._eps))
+        )
+        self._token_scale = float(np.clip(self._token_scale, -5.0, 5.0))
+        self._obs_buf[..., 5].fill(self._token_scale)
 
         # Build first observation using the new per-episode scales
         obs = self._build_observation(diff, h, t)
@@ -352,43 +478,33 @@ class SandShapingEnv(py_environment.PyEnvironment):
         z_abs = float(self._env_map.map[cy, cx])
         dz_rel = dz_norm * (self.max_push_mult * self._tool_radius)
 
-        # Global & local RMSE before the press
+        # Global & local metrics before the press
         diff_before, err_g_before = self._diff_and_rmse()
-        err_l_before = self._local_rmse(diff_before, cx, cy, self._local_radius)
-        mae_s_before, def_q_before = self._asym_height(diff_before)
-        grad_before = self._surplus_grad_l1(diff_before)
-        J_before = (
-            self._lambda_surplus * mae_s_before
-            + self._lambda_deficit * def_q_before
-            + self._beta_grad * grad_before
-        )
+        metrics_before = self._gather_metrics(diff_before, cx, cy, err_global=err_g_before)
+
+        # Prevent unsafe over-cuts: cap depth by local surplus (with small tolerance)
+        diff_center = metrics_before['diff_center']
+        safe_depth = max(0.0, diff_center + self._alpha_over * self._depth_unit)
+        dz_rel = min(dz_rel, safe_depth)
 
         # Apply press and measure removed volume
         removed, _ = self._env_map.apply_press_abs(x, y, z_abs, dz_rel)
         removed_norm = float(np.clip(removed / (self._max_press_volume + self._eps), 0.0, 1.0))
 
-        # Global & local RMSE after the press
+        # Global & local metrics after the press
         diff_after, err_g_after = self._diff_and_rmse()
         err_l_after  = self._local_rmse(diff_after, cx, cy, self._local_radius)
-        mae_s_after, def_q_after = self._asym_height(diff_after)
-        grad_after = self._surplus_grad_l1(diff_after)
-        J_after = (
-            self._lambda_surplus * mae_s_after
-            + self._lambda_deficit * def_q_after
-            + self._beta_grad * grad_after
-        )
+        rmse_sup_after = self._surplus_rmse(diff_after)
+        deficit_after = self._deficit_volume(diff_after)
         y0 = max(cy - self._local_radius, 0)
         y1 = min(cy + self._local_radius + 1, self._height)
         x0 = max(cx - self._local_radius, 0)
         x1 = min(cx + self._local_radius + 1, self._width)
         local_min_after = float(np.min(diff_after[y0:y1, x0:x1]))
         reward = self._compute_reward(
-            J_before, J_after,
-            def_q_before, def_q_after,
-            removed_norm,
-            local_min_after,
-            err_g_after,
-            err_l_after,
+            before=metrics_before,
+            after=metrics_after,
+            removed_norm=removed_norm,
         )
 
         # Debug scalars (log once so both transition/termination paths share)
@@ -398,7 +514,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             self._last_rel_improve = (err_g_before - err_g_after) / (err_g_before + self._eps)
             self._last_reward = reward
             self._last_err_global = err_g_after
-            self._last_err_local = err_l_after
+            self._last_err_local = metrics_after['rmse_local']
             self._last_grad = float(np.sqrt(np.mean(self._grad_buf**2)))
             self._last_lap  = float(np.sqrt(np.mean(self._lap_buf**2)))
 
@@ -409,7 +525,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         if (self._best_err - err_g_after) > self._plateau_tol:
             self._best_err = err_g_after
             self._plateau_counter = 0
-        elif self._step_count >= self._plateau_min_steps:
+        else:
             self._plateau_counter += 1
 
         # ----- early-termination checks -----
@@ -424,7 +540,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             return self._terminate_episode(diff_after, err_g_after, reward)
 
         # Plateau early-stop: no meaningful improvement for a patience window
-        if (self._step_count >= self._plateau_min_steps and
+        if (self._step_count > self._plateau_min_steps and
                 self._plateau_counter >= self._plateau_patience):
             return self._terminate_episode(diff_after, err_g_after, reward)
 
@@ -441,42 +557,75 @@ class SandShapingEnv(py_environment.PyEnvironment):
     #  Reward (potential-based shaping)                    #
     # ---------------------------------------------------- #
     def _compute_reward(self,
-                        J_before: float, J_after: float,
-                        def_q_before: float, def_q_after: float,
-                        removed_norm: float,
-                        local_min_after: float,
-                        err_g_after: float,
-                        err_l_after: float) -> float:
-        # Improvement of the carve-aware metric, normalized per episode.
-        denom = max(self._err0, self._eps)
-        improve = float(np.clip((J_before - J_after) / denom, -1.0, 1.0))
+                        *,
+                        before: dict[str, float],
+                        after: dict[str, float],
+                        removed_norm: float) -> float:
+        # Relative improvements (normalized by current error, so late-stage presses still get signal)
+        denom_rmse = max(before['rmse_global'], self._eps)
+        denom_mae = max(before['mae'], self._eps)
+        rel_rmse = float(np.clip((before['rmse_global'] - after['rmse_global']) / denom_rmse, -1.0, 1.0))
+        rel_mae  = float(np.clip((before['mae']         - after['mae'])         / denom_mae,  -1.0, 1.0))
 
-        # Penalize new deficit (quadratic cost) and local overcut depth.
-        delta_def_q = def_q_after - def_q_before
-        deficit_pen = self._k_deficit * max(0.0, delta_def_q) / max(def_q_before + self._eps, 1.0)
-        overcut = max(0.0, -(local_min_after + self._alpha_over * self._depth_unit)) / max(self._depth_unit, self._eps)
-        overcut_pen = self._k_overcut * overcut
+        # Footprint-local shaping: surplus removal and smoothing
+        local_surplus_drop = (before['loc_surplus'] - after['loc_surplus']) / max(self._depth_unit, self._eps)
+        local_grad_drop = before['loc_grad'] - after['loc_grad']
+        local_deficit_gain = max(0.0, after['loc_def'] - before['loc_def'])
+        local_deficit_pen = (
+            self._k_local_deficit
+            * local_deficit_gain
+            / max(self._depth_unit, self._eps)
+            * (1.0 + removed_norm)
+        )
+
+        # Global deficit and over-cutting penalties
+        delta_deficit = after['deficit'] - before['deficit']
+        deficit_pen = self._k_deficit * max(0.0, delta_deficit) / max(self._depth_unit, self._eps)
+
+        overcut_before = max(0.0, -(before['diff_center'] + self._alpha_over * self._depth_unit))
+        overcut_after = max(0.0, -(after['diff_center'] + self._alpha_over * self._depth_unit))
+        overcut_depth = max(0.0, overcut_after - overcut_before)
+        overcut_pen = self._k_overcut * (overcut_depth / max(self._depth_unit, self._eps)) * (
+            1.0 + self._overcut_vol_scale * removed_norm
+        )
+
+        center_deficit_pen = self._k_center_deficit * max(0.0, -before['diff_center']) / max(self._depth_unit, self._eps)
+
+        improve = (
+            self._lambda_rmse * rel_rmse
+            + self._lambda_mae * rel_mae
+            + self._lambda_local_surplus * local_surplus_drop
+            + self._lambda_local_grad * local_grad_drop
+        )
 
         reward = (
             self._reward_scale * improve
             - deficit_pen
+            - local_deficit_pen
             - overcut_pen
             - self._vol_reg * removed_norm
+            - center_deficit_pen
         )
 
         if self.debug:
             self._last_reward_terms = {
-                'improve': improve,
+                'rel_rmse': rel_rmse,
+                'rel_mae': rel_mae,
+                'local_surplus_drop': float(local_surplus_drop),
+                'local_grad_drop': float(local_grad_drop),
+                'improve': float(improve),
                 'deficit_pen': float(deficit_pen),
+                'local_deficit_pen': float(local_deficit_pen),
                 'overcut_pen': float(overcut_pen),
+                'center_deficit_pen': float(center_deficit_pen),
                 'removed_norm': float(removed_norm),
-                'delta_def_q': float(delta_def_q),
-                'overcut': float(overcut),
-                'J_before': float(J_before),
-                'J_after': float(J_after),
+                'delta_deficit': float(delta_deficit),
+                'overcut_depth': float(overcut_depth),
+                'overcut_before': float(overcut_before),
+                'overcut_after': float(overcut_after),
             }
             self._last_reward = float(reward)
-            self._last_err_global = float(err_g_after)
-            self._last_err_local = float(err_l_after)
+            self._last_err_global = float(after['rmse_global'])
+            self._last_err_local = float(after['rmse_local'])
             self._last_rel_improve = float(improve)
         return float(reward)
