@@ -154,10 +154,10 @@ class SpatialSoftmax(layers.Layer):
 
     def __init__(
         self,
-        temperature: float = 1.0,
+        temperature: float = 2.0,
         learnable: bool = True,
         min_temperature: float = 0.4,
-        max_temperature: float = 3.0,
+        max_temperature: float = 4.0,
         reg_coeff: float = 0.0,
         target_temperature: float | None = None,
         **kwargs,

@@ -253,8 +253,8 @@ def train(
 
     global_step = tf.compat.v1.train.get_or_create_global_step()
     tqdm.write(f"[Agent] Initialising SAC agent with encoder '{encoder_type}'")
-    alpha_lr = learning_rate * 0.2
-    critic_lr = learning_rate * 0.5
+    alpha_lr = learning_rate * 0.5
+    critic_lr = learning_rate * 1.0
 
     # Robust TD loss to tame critic spikes (element-wise to satisfy per-sample loss requirement)
     def _huber_td_loss(td_targets, td_predictions, delta: float = 1.0):
@@ -274,13 +274,13 @@ def train(
         critic_optimizer=Adam(critic_lr, clipnorm=1.0),
         # Lower alpha LR and explicit target entropy to steady exploration temperature
         alpha_optimizer=Adam(alpha_lr, clipnorm=1.0),
-        target_entropy=-2.0,
+        target_entropy=-3.0,
         target_update_tau=0.005,
         target_update_period=1,
         td_errors_loss_fn=_huber_td_loss,
         gamma=gamma,
         # Reduced reward scale factor to calm TD targets
-        reward_scale_factor=0.4,
+        reward_scale_factor=0.6,
         train_step_counter=global_step
     )
     tf_agent.initialize()
