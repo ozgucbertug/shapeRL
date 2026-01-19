@@ -1,3 +1,5 @@
+from collections import deque
+
 import numpy as np
 from tf_agents.environments import py_environment
 from tf_agents.specs import array_spec
@@ -98,6 +100,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._success_threshold = self._error_threshold
         self._plateau_tol = 0.0
         self._token_scale = 0.0
+        self._err_history = deque(maxlen=max(2, int(self._plateau_patience)) + 1)
 
         # Precompute a circular mask for footprint-local stats
         coords = np.indices((2 * self._tool_radius + 1, 2 * self._tool_radius + 1))
@@ -421,6 +424,8 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._current_err_global = self._err0
         self._best_err = self._err0
         self._plateau_counter = 0
+        self._err_history.clear()
+        self._err_history.append(self._err0)
         self._success_threshold = max(self._error_threshold,
                                       self._relative_success_frac * self._err0)
         self._plateau_tol = self._plateau_improve_tol * self._err0
@@ -521,12 +526,23 @@ class SandShapingEnv(py_environment.PyEnvironment):
         # Count this step before applying patience logic
         self._step_count += 1
 
-        # Update best-so-far error and plateau counter
-        if (self._best_err - err_g_after) > self._plateau_tol:
+        # Update best-so-far error and plateau counter.
+        # Use a tolerance relative to the current error so late-stage improvements can reset patience.
+        current_plateau_tol = self._plateau_improve_tol * max(err_g_after, self._eps)
+        self._plateau_tol = current_plateau_tol
+        if err_g_after < self._best_err:
             self._best_err = err_g_after
-            self._plateau_counter = 0
+
+        self._err_history.append(err_g_after)
+        if (self._step_count > self._plateau_min_steps and
+                len(self._err_history) > self._plateau_patience):
+            window_improve = self._err_history[0] - self._err_history[-1]
+            if window_improve > current_plateau_tol:
+                self._plateau_counter = 0
+            else:
+                self._plateau_counter += 1
         else:
-            self._plateau_counter += 1
+            self._plateau_counter = 0
 
         # ----- early-termination checks -----
         if self._terminate_on_success and err_g_after <= self._success_threshold:
@@ -539,7 +555,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
             reward += self._fail_penalty
             return self._terminate_episode(diff_after, err_g_after, reward)
 
-        # Plateau early-stop: no meaningful improvement for a patience window
+        # Plateau early-stop: no meaningful improvement over the rolling window.
         if (self._step_count > self._plateau_min_steps and
                 self._plateau_counter >= self._plateau_patience):
             return self._terminate_episode(diff_after, err_g_after, reward)
