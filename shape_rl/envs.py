@@ -575,38 +575,46 @@ class SandShapingEnv(py_environment.PyEnvironment):
                         before: dict[str, float],
                         after: dict[str, float],
                         removed_norm: float) -> float:
-        # Relative improvements (normalized by current error, so late-stage presses still get signal)
-        denom_rmse = max(before['rmse_global'], self._eps)
-        rel_rmse = float(np.clip((before['rmse_global'] - after['rmse_global']) / denom_rmse, -1.0, 1.0))
+        # Scales (dynamic) for improvement terms.
+        global_scale = max(before['rmse_global'], self._eps)
+        local_scale = max(before['loc_surplus'], self._eps)
+        grad_scale = max(before['loc_grad'], self._eps)
 
-        # Footprint-local shaping: surplus removal and smoothing
-        local_surplus_drop = (before['loc_surplus'] - after['loc_surplus']) / max(self._depth_unit, self._eps)
-        local_grad_drop = before['loc_grad'] - after['loc_grad']
-        local_deficit_gain = max(0.0, after['loc_def'] - before['loc_def'])
-        local_deficit_pen = (
-            self._k_local_deficit
-            * local_deficit_gain
-            / max(self._depth_unit, self._eps)
-            * (1.0 + removed_norm)
-        )
-
-        # Global deficit and over-cutting penalties
-        delta_deficit = after['deficit'] - before['deficit']
-        deficit_pen = self._k_deficit * max(0.0, delta_deficit) / max(self._depth_unit, self._eps)
-
-        overcut_before = max(0.0, -(before['diff_center'] + self._alpha_over * self._depth_unit))
-        overcut_after = max(0.0, -(after['diff_center'] + self._alpha_over * self._depth_unit))
-        overcut_depth = max(0.0, overcut_after - overcut_before)
-        overcut_pen = self._k_overcut * (overcut_depth / max(self._depth_unit, self._eps)) * (
-            1.0 + self._overcut_vol_scale * removed_norm
-        )
-
-        center_deficit_pen = self._k_center_deficit * max(0.0, -before['diff_center']) / max(self._depth_unit, self._eps)
+        # Relative improvements (bounded with tanh to reduce spikes).
+        rel_rmse = float(np.tanh((before['rmse_global'] - after['rmse_global']) / global_scale))
+        local_surplus_drop = float(np.tanh((before['loc_surplus'] - after['loc_surplus']) / local_scale))
+        local_grad_drop = float(np.tanh((before['loc_grad'] - after['loc_grad']) / grad_scale))
 
         improve = (
             self._lambda_rmse * rel_rmse
             + self._lambda_local_surplus * local_surplus_drop
             + self._lambda_local_grad * local_grad_drop
+        )
+
+        # Penalties (scaled by episode-level norms for stability).
+        penalty_scale = max(self._s_diff, self._err0, self._eps)
+        depth_scale = max(self._depth_unit, self._eps)
+
+        local_deficit_gain = max(0.0, after['loc_def'] - before['loc_def'])
+        local_deficit_pen = (
+            self._k_local_deficit
+            * local_deficit_gain
+            / penalty_scale
+            * (1.0 + removed_norm)
+        )
+
+        delta_deficit = after['deficit'] - before['deficit']
+        deficit_pen = self._k_deficit * max(0.0, delta_deficit) / depth_scale
+
+        overcut_before = max(0.0, -(before['diff_center'] + self._alpha_over * self._depth_unit))
+        overcut_after = max(0.0, -(after['diff_center'] + self._alpha_over * self._depth_unit))
+        overcut_depth = max(0.0, overcut_after - overcut_before)
+        overcut_pen = self._k_overcut * (overcut_depth / penalty_scale) * (
+            1.0 + self._overcut_vol_scale * removed_norm
+        )
+
+        center_deficit_pen = (
+            self._k_center_deficit * max(0.0, -before['diff_center']) / penalty_scale
         )
 
         reward = (
