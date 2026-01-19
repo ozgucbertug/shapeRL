@@ -330,7 +330,7 @@ def summarize_metric_series(series_or_list: Sequence[float] | Sequence[Sequence[
 
 
 # --- Helper: log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run ---
-def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix: str = 'eval_runs'):
+def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix: str = 'eval'):
     """
     Log per-step RMSE/MAE/W2 curves as native TensorBoard scalars in a separate run directory.
     Prefer the first episode's curves when per-episode series are available.
@@ -370,7 +370,13 @@ def log_eval_metric_curves(metrics: dict, logdir: str, run_name: str, run_prefix
 
 
 # --- Pretty-print evaluation metrics in a multi-line compact format
-def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = None, width: int = 80) -> None:
+def print_eval_metrics(
+    metrics: dict,
+    header: str = "Eval",
+    step: int | None = None,
+    width: int = 80,
+    eval_seconds: float | None = None,
+) -> None:
     """
     Pretty-print evaluation metrics in a consistent, compact multi-line format.
     Uses tqdm.write to avoid clobbering progress bars.
@@ -388,11 +394,14 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
     w2_summary = summarize_metric_series(metrics.get('w2_series_list'))
     steps_series = metrics.get('steps_series_list')
     steps_mean_val = None
+    steps_total = None
     try:
         if steps_series is not None:
             steps_mean_val = int(round(float(np.mean(steps_series))))
+            steps_total = int(np.sum(steps_series))
     except Exception:
         steps_mean_val = None
+        steps_total = None
 
     reward_series = metrics.get('reward_series_list') or []
     episode_returns: list[float] = []
@@ -427,6 +436,9 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
     tqdm.write(head)
     if steps_mean_val is not None:
         tqdm.write(f"Episode Steps: {steps_mean_val:d}")
+    if eval_seconds is not None and steps_total:
+        per_step_ms = (eval_seconds / max(steps_total, 1)) * 1e3
+        tqdm.write(f"Eval Time: {eval_seconds:.2f}s | {per_step_ms:.3f} ms/step")
     tqdm.write(
         "Δ% — RMSE {rmse} | MAE {mae} | W2 {w2}".format(
             rmse=_format_rel_improve(rmse_summary),
@@ -445,13 +457,6 @@ def print_eval_metrics(metrics: dict, header: str = "Eval", step: int | None = N
         if np.isfinite(return_rmse_corr):
             corr_str = f"{return_rmse_corr:.3f}"
         tqdm.write(f"Return — mean {ret_mean:.3f} | corr(return, ΔRMSE) {corr_str}")
-    if reward_series:
-        first_curve = reward_series[0]
-        if first_curve:
-            try:
-                tqdm.write(f"First-episode return curve samples: start {first_curve[0]:.3f} end {first_curve[-1]:.3f}")
-            except Exception:
-                pass
     tqdm.write(sep)
 
 

@@ -298,7 +298,14 @@ def train(
             except Exception:
                 pass
 
-    def log_eval_summaries(metrics: dict, step_val: int):
+    def log_eval_summaries(
+        metrics: dict,
+        step_val: int,
+        tag_prefix: str = "eval",
+        writer=None,
+    ):
+        if writer is None:
+            writer = summary_writer
         rmse_summary = summarize_metric_series(metrics.get('rmse_series_list'))
         mae_summary = summarize_metric_series(metrics.get('mae_series_list'))
         w2_summary = summarize_metric_series(metrics.get('w2_series_list'))
@@ -368,37 +375,32 @@ def train(
         corr_step_mae = _per_step_corr(metrics.get('mae_series_list'))
         corr_step_w2 = _per_step_corr(metrics.get('w2_series_list'))
 
-        # Group tags so RMSE/MAE/W2 for each statistic share a single TensorBoard chart.
-        tf.summary.scalar('eval/delta_norm/rmse', rmse_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/delta_norm/mae', mae_summary['delta'], step=step_val)
-        tf.summary.scalar('eval/delta_norm/w2', w2_summary['delta'], step=step_val)
+        with writer.as_default():
+            # Group tags so RMSE/MAE/W2 for each statistic share a single TensorBoard chart.
+            tf.summary.scalar(f'{tag_prefix}/delta_norm/rmse', rmse_summary['delta'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/delta_norm/mae', mae_summary['delta'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/delta_norm/w2', w2_summary['delta'], step=step_val)
 
-        tf.summary.scalar('eval/auc_norm/rmse', rmse_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/auc_norm/mae', mae_summary['auc_norm'], step=step_val)
-        tf.summary.scalar('eval/auc_norm/w2', w2_summary['auc_norm'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/auc_norm/rmse', rmse_summary['auc_norm'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/auc_norm/mae', mae_summary['auc_norm'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/auc_norm/w2', w2_summary['auc_norm'], step=step_val)
 
-        tf.summary.scalar('eval/slope_norm/rmse', rmse_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/slope_norm/mae', mae_summary['slope'], step=step_val)
-        tf.summary.scalar('eval/slope_norm/w2', w2_summary['slope'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/slope_norm/rmse', rmse_summary['slope'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/slope_norm/mae', mae_summary['slope'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/slope_norm/w2', w2_summary['slope'], step=step_val)
 
-        tf.summary.scalar('eval/pos_frac/rmse', rmse_summary['pos_improve_frac'], step=step_val)
-        tf.summary.scalar('eval/pos_frac/mae', mae_summary['pos_improve_frac'], step=step_val)
-        tf.summary.scalar('eval/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
-        tf.summary.scalar('eval/_steps_mean', float(np.mean(steps_series)), step=step_val)
-        if episode_returns:
-            tf.summary.scalar('eval/_return_mean', float(np.mean(episode_returns)), step=step_val)
-        if np.isfinite(corr_ep_rmse):
-            tf.summary.scalar('eval/per_ep_corr/rmse', corr_ep_rmse, step=step_val)
-        if np.isfinite(corr_ep_mae):
-            tf.summary.scalar('eval/per_ep_corr/mae', corr_ep_mae, step=step_val)
-        if np.isfinite(corr_ep_w2):
-            tf.summary.scalar('eval/per_ep_corr/w2', corr_ep_w2, step=step_val)
-        if np.isfinite(corr_step_rmse):
-            tf.summary.scalar('eval/per_step_corr/rmse', corr_step_rmse, step=step_val)
-        if np.isfinite(corr_step_mae):
-            tf.summary.scalar('eval/per_step_corr/mae', corr_step_mae, step=step_val)
-        if np.isfinite(corr_step_w2):
-            tf.summary.scalar('eval/per_step_corr/w2', corr_step_w2, step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/pos_frac/rmse', rmse_summary['pos_improve_frac'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/pos_frac/mae', mae_summary['pos_improve_frac'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
+            tf.summary.scalar(f'{tag_prefix}/_steps_mean', float(np.mean(steps_series)), step=step_val)
+            if episode_returns:
+                tf.summary.scalar(f'{tag_prefix}/_return_mean', float(np.mean(episode_returns)), step=step_val)
+            if np.isfinite(corr_step_rmse):
+                tf.summary.scalar(f'{tag_prefix}/per_step_corr/rmse', corr_step_rmse, step=step_val)
+            if np.isfinite(corr_step_mae):
+                tf.summary.scalar(f'{tag_prefix}/per_step_corr/mae', corr_step_mae, step=step_val)
+            if np.isfinite(corr_step_w2):
+                tf.summary.scalar(f'{tag_prefix}/per_step_corr/w2', corr_step_w2, step=step_val)
 
         return rmse_summary, mae_summary, w2_summary
 
@@ -409,6 +411,8 @@ def train(
     logdir = os.path.join(log_root, run_name if run_name else ts_name)
     summary_writer = tf.summary.create_file_writer(logdir)
     summary_writer.set_as_default()
+    eval_det_writer = tf.summary.create_file_writer(os.path.join(logdir, "_eval_det"))
+    eval_stoch_writer = tf.summary.create_file_writer(os.path.join(logdir, "_eval_stoch"))
     tqdm.write(f"[Logging] Writing TensorBoard summaries to {logdir}")
 
     if checkpoint_interval is None:
@@ -431,19 +435,23 @@ def train(
         tf.summary.scalar('train/step_reward', tf.reduce_mean(trajectory.reward), step=global_step)
 
     def action_summary(trajectory):
-        # Log mean action components across the batch
+        # Log mean/std action components across the batch
         actions = trajectory.action
+        action_x = actions[..., 0]
+        action_y = actions[..., 1]
+        action_depth = actions[..., 2]
         tf.summary.scalar('train/action_x_mean',
-                          tf.reduce_mean(actions[..., 0]), step=global_step)
+                          tf.reduce_mean(action_x), step=global_step)
         tf.summary.scalar('train/action_y_mean',
-                          tf.reduce_mean(actions[..., 1]), step=global_step)
+                          tf.reduce_mean(action_y), step=global_step)
         tf.summary.scalar('train/action_depth_mean',
-                          tf.reduce_mean(actions[..., 2]), step=global_step)
-
-    def buffer_summary(_trajectory):
-        # Log current size of the replay buffer
-        tf.summary.scalar('replay_buffer/size',
-                          replay_buffer.num_frames(), step=global_step)
+                          tf.reduce_mean(action_depth), step=global_step)
+        tf.summary.scalar('train/action_x_std',
+                          tf.math.reduce_std(action_x), step=global_step)
+        tf.summary.scalar('train/action_y_std',
+                          tf.math.reduce_std(action_y), step=global_step)
+        tf.summary.scalar('train/action_depth_std',
+                          tf.math.reduce_std(action_depth), step=global_step)
 
     replay_buffer = tf_uniform_replay_buffer.TFUniformReplayBuffer(
         data_spec=tf_agent.collect_data_spec,
@@ -484,53 +492,56 @@ def train(
         observers=[
             replay_buffer.add_batch,
             collect_summary,
-            action_summary,
-            buffer_summary
+            action_summary
         ],
         num_steps=collect_steps_per_update
     )
     tqdm.write("[Drivers] Collection driver prepared")
 
-    # --- Evaluate heuristic policy performance on raw PyEnvironment ---
-    tqdm.write("[Heuristic Eval] Evaluating heuristic policy baselines")
-    heuristic_policy = HeuristicPressPolicy(
-        time_step_spec=train_py_env.time_step_spec(),
-        action_spec=action_spec,
-        width=eval_py_env._patch_width,
-        height=eval_py_env._patch_height,
-        tool_radius=eval_py_env._tool_radius,
-        amp_max=eval_py_env._amplitude_range[1],
-        max_push_mult=eval_py_env.max_push_mult,
-    )
-    # Evaluate heuristic with the unified compute_eval for consistency
-    heur_metrics = compute_eval(
-        eval_env_factory,
-        heuristic_policy,
-        num_eval_episodes,
-        base_seed=eval_base_seed,
-    )
-    print_eval_metrics(heur_metrics, header="Heuristic Greedy Eval")
-    if log_eval_curves:
-        log_eval_metric_curves(heur_metrics, logdir, run_name="_greedy")
+    # # --- Evaluate heuristic policy performance on raw PyEnvironment ---
+    # tqdm.write("[Heuristic Eval] Evaluating heuristic policy baselines")
+    # heuristic_policy = HeuristicPressPolicy(
+    #     time_step_spec=train_py_env.time_step_spec(),
+    #     action_spec=action_spec,
+    #     width=eval_py_env._patch_width,
+    #     height=eval_py_env._patch_height,
+    #     tool_radius=eval_py_env._tool_radius,
+    #     amp_max=eval_py_env._amplitude_range[1],
+    #     max_push_mult=eval_py_env.max_push_mult,
+    # )
+    # # Evaluate heuristic with the unified compute_eval for consistency
+    # heur_start = time.perf_counter()
+    # heur_metrics = compute_eval(
+    #     eval_env_factory,
+    #     heuristic_policy,
+    #     num_eval_episodes,
+    #     base_seed=eval_base_seed,
+    # )
+    # heur_elapsed = max(time.perf_counter() - heur_start, 0.0)
+    # print_eval_metrics(heur_metrics, header="Heuristic Greedy Eval", eval_seconds=heur_elapsed)
+    # if log_eval_curves:
+    #     log_eval_metric_curves(heur_metrics, logdir, run_name="_greedy")
 
-    footprint_policy = HeuristicFootprintPressPolicy(
-        time_step_spec=train_py_env.time_step_spec(),
-        action_spec=action_spec,
-        width=eval_py_env._patch_width,
-        height=eval_py_env._patch_height,
-        tool_radius=eval_py_env._tool_radius,
-        amp_max=eval_py_env._amplitude_range[1],
-        max_push_mult=eval_py_env.max_push_mult,
-    )
-    footprint_metrics = compute_eval(
-        eval_env_factory,
-        footprint_policy,
-        num_eval_episodes,
-        base_seed=eval_base_seed,
-    )
-    print_eval_metrics(footprint_metrics, header="Heuristic Footprint Eval")
-    if log_eval_curves:
-        log_eval_metric_curves(footprint_metrics, logdir, run_name="_footprint")
+    # footprint_policy = HeuristicFootprintPressPolicy(
+    #     time_step_spec=train_py_env.time_step_spec(),
+    #     action_spec=action_spec,
+    #     width=eval_py_env._patch_width,
+    #     height=eval_py_env._patch_height,
+    #     tool_radius=eval_py_env._tool_radius,
+    #     amp_max=eval_py_env._amplitude_range[1],
+    #     max_push_mult=eval_py_env.max_push_mult,
+    # )
+    # footprint_start = time.perf_counter()
+    # footprint_metrics = compute_eval(
+    #     eval_env_factory,
+    #     footprint_policy,
+    #     num_eval_episodes,
+    #     base_seed=eval_base_seed,
+    # )
+    # footprint_elapsed = max(time.perf_counter() - footprint_start, 0.0)
+    # print_eval_metrics(footprint_metrics, header="Heuristic Footprint Eval", eval_seconds=footprint_elapsed)
+    # if log_eval_curves:
+    #     log_eval_metric_curves(footprint_metrics, logdir, run_name="_footprint")
 
     lookahead_policy = HeuristicLookaheadPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
@@ -542,15 +553,17 @@ def train(
         max_push_mult=eval_py_env.max_push_mult,
         alpha_over=getattr(eval_py_env, "_alpha_over", 0.5),
     )
-    lookahead_metrics = compute_eval(
-        eval_env_factory,
-        lookahead_policy,
-        num_eval_episodes,
-        base_seed=eval_base_seed,
-    )
-    print_eval_metrics(lookahead_metrics, header="Heuristic Lookahead Eval")
-    if log_eval_curves:
-        log_eval_metric_curves(lookahead_metrics, logdir, run_name="_lookahead")
+    # lookahead_start = time.perf_counter()
+    # lookahead_metrics = compute_eval(
+    #     eval_env_factory,
+    #     lookahead_policy,
+    #     num_eval_episodes,
+    #     base_seed=eval_base_seed,
+    # )
+    # lookahead_elapsed = max(time.perf_counter() - lookahead_start, 0.0)
+    # print_eval_metrics(lookahead_metrics, header="Heuristic Lookahead Eval", eval_seconds=lookahead_elapsed)
+    # if log_eval_curves:
+    #     log_eval_metric_curves(lookahead_metrics, logdir, run_name="_lookahead")
 
     # Warm-up buffer: heuristic or random
     def _num_frames() -> int:
@@ -609,7 +622,7 @@ def train(
                 observers.append(_warmup_observer)
             heuristic_driver = PyDriver(
                 train_py_env,
-                heuristic_policy,
+                lookahead_policy,
                 observers=observers,
                 max_steps=collect_steps_per_update * num_parallel_envs,
             )
@@ -761,12 +774,6 @@ def train(
                                 loss_components.append(f"{display_name}={float(tensor.numpy()):.4f}")
                             except Exception:
                                 continue
-                try:
-                    buffer_fill = _num_frames()
-                    loss_components.append(f"replay={buffer_fill}")
-                except Exception:
-                    pass
-
                 # Log learned SpatialSoftmax temperature (if applicable)
                 log_spatialsoftmax_temperature(update)
 
@@ -791,19 +798,36 @@ def train(
                     tqdm.write(f"[Checkpoint] Failed to save periodic checkpoint: {checkpoint_err}")
             if eval_interval > 0 and update % eval_interval == 0:
                 # Detailed evaluation metrics
+                eval_start = time.perf_counter()
                 metrics = compute_eval(
                     eval_env_factory,
                     eval_policy,
                     num_eval_episodes,
                     base_seed=eval_base_seed,
                 )
-                rmse_summary, mae_summary, w2_summary = log_eval_summaries(metrics, update)
+                eval_elapsed = max(time.perf_counter() - eval_start, 0.0)
+                log_eval_summaries(metrics, update, tag_prefix="eval", writer=eval_det_writer)
 
                 # Log per-update eval curves as native TensorBoard scalars in a separate run dir
                 if log_eval_curves:
-                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:07d}")
+                    log_eval_metric_curves(metrics, logdir, run_name=f"det_{update:07d}")
 
-                print_eval_metrics(metrics, header="Eval", step=update)
+                print_eval_metrics(metrics, header="Eval", step=update, eval_seconds=eval_elapsed)
+
+                eval_stoch_start = time.perf_counter()
+                metrics_stoch = compute_eval(
+                    eval_env_factory,
+                    tf_agent.policy,
+                    num_eval_episodes,
+                    base_seed=eval_base_seed,
+                )
+                eval_stoch_elapsed = max(time.perf_counter() - eval_stoch_start, 0.0)
+                log_eval_summaries(metrics_stoch, update, tag_prefix="eval", writer=eval_stoch_writer)
+
+                if log_eval_curves:
+                    log_eval_metric_curves(metrics_stoch, logdir, run_name=f"stoch_{update:07d}")
+
+                print_eval_metrics(metrics_stoch, header="Eval/Stoch", step=update, eval_seconds=eval_stoch_elapsed)
     except KeyboardInterrupt:
         tqdm.write(f"[Train] Interrupted at update {current_update}")
         tqdm.write("[Checkpoint] Skipping final checkpoint save due to interruption")
