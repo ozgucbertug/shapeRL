@@ -179,6 +179,15 @@ class SandShapingEnv(py_environment.PyEnvironment):
         quad_deficit = float(np.mean(deficit * deficit))
         return mae_surplus, quad_deficit
 
+    def _surplus_rmse(self, diff_map: np.ndarray) -> float:
+        """RMSE over removable surplus only (diff > 0)."""
+        surplus = np.maximum(diff_map, 0.0)
+        return float(np.sqrt(np.mean(surplus * surplus)))
+
+    def _deficit_volume(self, diff_map: np.ndarray) -> float:
+        """Total deficit magnitude (diff < 0)."""
+        return float(np.sum(np.maximum(-diff_map, 0.0)))
+
     def _surplus_grad_l1(self, diff_map: np.ndarray) -> float:
         """L1 gradient of surplus-only surface (structure without penalizing deficits)."""
         surplus = np.maximum(diff_map, 0.0)
@@ -504,6 +513,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
         x0 = max(cx - self._local_radius, 0)
         x1 = min(cx + self._local_radius + 1, self._width)
         local_min_after = float(np.min(diff_after[y0:y1, x0:x1]))
+        metrics_after = self._gather_metrics(diff_after, cx, cy, err_global=err_g_after)
         reward = self._compute_reward(
             before=metrics_before,
             after=metrics_after,

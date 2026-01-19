@@ -386,7 +386,7 @@ def train(
         tf.summary.scalar('eval/pos_frac/w2', w2_summary['pos_improve_frac'], step=step_val)
         tf.summary.scalar('eval/_steps_mean', float(np.mean(steps_series)), step=step_val)
         if episode_returns:
-            tf.summary.scalar('eval/return_mean', float(np.mean(episode_returns)), step=step_val)
+            tf.summary.scalar('eval/_return_mean', float(np.mean(episode_returns)), step=step_val)
         if np.isfinite(corr_ep_rmse):
             tf.summary.scalar('eval/per_ep_corr/rmse', corr_ep_rmse, step=step_val)
         if np.isfinite(corr_ep_mae):
@@ -496,10 +496,11 @@ def train(
     heuristic_policy = HeuristicPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
-        width=eval_py_env._width,
-        height=eval_py_env._height,
+        width=eval_py_env._patch_width,
+        height=eval_py_env._patch_height,
         tool_radius=eval_py_env._tool_radius,
         amp_max=eval_py_env._amplitude_range[1],
+        max_push_mult=eval_py_env.max_push_mult,
     )
     # Evaluate heuristic with the unified compute_eval for consistency
     heur_metrics = compute_eval(
@@ -510,15 +511,16 @@ def train(
     )
     print_eval_metrics(heur_metrics, header="Heuristic Greedy Eval")
     if log_eval_curves:
-        log_eval_metric_curves(heur_metrics, logdir, run_name="eval_heuristic")
+        log_eval_metric_curves(heur_metrics, logdir, run_name="_greedy")
 
     footprint_policy = HeuristicFootprintPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
-        width=eval_py_env._width,
-        height=eval_py_env._height,
+        width=eval_py_env._patch_width,
+        height=eval_py_env._patch_height,
         tool_radius=eval_py_env._tool_radius,
         amp_max=eval_py_env._amplitude_range[1],
+        max_push_mult=eval_py_env.max_push_mult,
     )
     footprint_metrics = compute_eval(
         eval_env_factory,
@@ -528,15 +530,16 @@ def train(
     )
     print_eval_metrics(footprint_metrics, header="Heuristic Footprint Eval")
     if log_eval_curves:
-        log_eval_metric_curves(footprint_metrics, logdir, run_name="eval_heuristic_footprint")
+        log_eval_metric_curves(footprint_metrics, logdir, run_name="_footprint")
 
     lookahead_policy = HeuristicLookaheadPressPolicy(
         time_step_spec=train_py_env.time_step_spec(),
         action_spec=action_spec,
-        width=eval_py_env._width,
-        height=eval_py_env._height,
+        width=eval_py_env._patch_width,
+        height=eval_py_env._patch_height,
         tool_radius=eval_py_env._tool_radius,
         amp_max=eval_py_env._amplitude_range[1],
+        max_push_mult=eval_py_env.max_push_mult,
         alpha_over=getattr(eval_py_env, "_alpha_over", 0.5),
     )
     lookahead_metrics = compute_eval(
@@ -547,7 +550,7 @@ def train(
     )
     print_eval_metrics(lookahead_metrics, header="Heuristic Lookahead Eval")
     if log_eval_curves:
-        log_eval_metric_curves(lookahead_metrics, logdir, run_name="eval_heuristic_lookahead")
+        log_eval_metric_curves(lookahead_metrics, logdir, run_name="_lookahead")
 
     # Warm-up buffer: heuristic or random
     def _num_frames() -> int:
@@ -798,7 +801,7 @@ def train(
 
                 # Log per-update eval curves as native TensorBoard scalars in a separate run dir
                 if log_eval_curves:
-                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:09d}")
+                    log_eval_metric_curves(metrics, logdir, run_name=f"eval_{update:07d}")
 
                 print_eval_metrics(metrics, header="Eval", step=update)
     except KeyboardInterrupt:
