@@ -86,7 +86,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         # Additional reward shaping / safety weights
         self._lambda_rmse = 2.0            # weight on global RMSE improvement
-        self._lambda_mae = 1.5             # weight on global MAE improvement
         self._lambda_local_surplus = 1.25  # reward for removing surplus in the pressed footprint
         self._lambda_local_grad = 0.2      # encourage local smoothing on surplus
         self._k_local_deficit = 2.5        # penalize new local deficits created by the press
@@ -96,7 +95,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         self._local_radius = 1 * self._tool_radius
         self._max_press_volume = self._compute_max_press_volume()
         self._depth_unit = max(self.max_push_mult * self._tool_radius, self._eps)
-        self._last_reward_terms: dict[str, float] = {}
         self._success_threshold = self._error_threshold
         self._plateau_tol = 0.0
         self._token_scale = 0.0
@@ -579,9 +577,7 @@ class SandShapingEnv(py_environment.PyEnvironment):
                         removed_norm: float) -> float:
         # Relative improvements (normalized by current error, so late-stage presses still get signal)
         denom_rmse = max(before['rmse_global'], self._eps)
-        denom_mae = max(before['mae'], self._eps)
         rel_rmse = float(np.clip((before['rmse_global'] - after['rmse_global']) / denom_rmse, -1.0, 1.0))
-        rel_mae  = float(np.clip((before['mae']         - after['mae'])         / denom_mae,  -1.0, 1.0))
 
         # Footprint-local shaping: surplus removal and smoothing
         local_surplus_drop = (before['loc_surplus'] - after['loc_surplus']) / max(self._depth_unit, self._eps)
@@ -609,7 +605,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
 
         improve = (
             self._lambda_rmse * rel_rmse
-            + self._lambda_mae * rel_mae
             + self._lambda_local_surplus * local_surplus_drop
             + self._lambda_local_grad * local_grad_drop
         )
@@ -624,22 +619,6 @@ class SandShapingEnv(py_environment.PyEnvironment):
         )
 
         if self.debug:
-            self._last_reward_terms = {
-                'rel_rmse': rel_rmse,
-                'rel_mae': rel_mae,
-                'local_surplus_drop': float(local_surplus_drop),
-                'local_grad_drop': float(local_grad_drop),
-                'improve': float(improve),
-                'deficit_pen': float(deficit_pen),
-                'local_deficit_pen': float(local_deficit_pen),
-                'overcut_pen': float(overcut_pen),
-                'center_deficit_pen': float(center_deficit_pen),
-                'removed_norm': float(removed_norm),
-                'delta_deficit': float(delta_deficit),
-                'overcut_depth': float(overcut_depth),
-                'overcut_before': float(overcut_before),
-                'overcut_after': float(overcut_after),
-            }
             self._last_reward = float(reward)
             self._last_err_global = float(after['rmse_global'])
             self._last_err_local = float(after['rmse_local'])

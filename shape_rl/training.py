@@ -733,16 +733,6 @@ def train(
                     except Exception:
                         pass
 
-                reward_terms: dict[str, list[float]] = {}
-                for env in python_envs:
-                    terms = getattr(env, '_last_reward_terms', None)
-                    if not terms:
-                        continue
-                    for key, value in terms.items():
-                        reward_terms.setdefault(key, []).append(value)
-                for key, values in reward_terms.items():
-                    tf.summary.scalar(f'train/reward_terms/{key}',
-                                      float(np.mean(values)), step=update)
             if log_interval > 0 and update % log_interval == 0:
                 now = time.perf_counter()
                 elapsed = max(now - last_log_time, 1e-6)
